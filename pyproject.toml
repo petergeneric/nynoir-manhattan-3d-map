@@ -1,0 +1,14 @@
+[project]
+name = "atlas"
+version = "0.1.0"
+description = "Segment Anything Model tool"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "torchvision",
+    "segment-anything @ git+https://github.com/facebookresearch/segment-anything.git",
+    "opencv-python",
+    "supervision",
+    "numpy",
+]
