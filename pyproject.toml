@@ -11,4 +11,5 @@ dependencies = [
     "opencv-python",
     "supervision",
     "numpy",
+    "Pillow",  # For JP2 fallback support
 ]
