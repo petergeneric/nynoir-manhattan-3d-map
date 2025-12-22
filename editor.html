@@ -136,6 +136,56 @@
             overflow: hidden;
         }
 
+        .sidebar-tabs {
+            display: flex;
+            border-bottom: 1px solid #0f3460;
+        }
+
+        .sidebar-tab {
+            flex: 1;
+            padding: 10px 12px;
+            background: transparent;
+            border: none;
+            color: #888;
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.15s;
+            border-bottom: 2px solid transparent;
+        }
+
+        .sidebar-tab:hover {
+            color: #ccc;
+            background: rgba(255,255,255,0.05);
+        }
+
+        .sidebar-tab.active {
+            color: #fff;
+            border-bottom-color: #e94560;
+        }
+
+        .sidebar-tab .tab-count {
+            background: #0f3460;
+            padding: 2px 6px;
+            border-radius: 10px;
+            font-size: 11px;
+            margin-left: 6px;
+        }
+
+        .sidebar-tab.active .tab-count {
+            background: #e94560;
+        }
+
+        .tab-content {
+            display: none;
+            flex: 1;
+            overflow: hidden;
+            flex-direction: column;
+        }
+
+        .tab-content.active {
+            display: flex;
+        }
+
         .sidebar-header {
             padding: 12px 16px;
             border-bottom: 1px solid #0f3460;
@@ -150,6 +200,43 @@
             flex: 1;
             overflow-y: auto;
             padding: 8px;
+        }
+
+        .deleted-item {
+            padding: 10px 12px;
+            background: #2a1a1a;
+            border-radius: 4px;
+            margin-bottom: 6px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            transition: background 0.15s;
+            border-left: 3px solid #8b0000;
+        }
+
+        .deleted-item:hover {
+            background: #3a2525;
+        }
+
+        .deleted-item.selected {
+            background: #4a2a2a;
+            outline: 2px solid #cc5555;
+        }
+
+        .restore-btn {
+            background: #3a506b;
+            border: none;
+            color: #fff;
+            padding: 4px 8px;
+            border-radius: 3px;
+            font-size: 11px;
+            cursor: pointer;
+            margin-left: auto;
+        }
+
+        .restore-btn:hover {
+            background: #4a6a8b;
         }
 
         .block-item {
@@ -318,8 +405,74 @@
         }
 
         .svg-polygon.selected {
+            stroke: white !important;
             stroke-width: 4 !important;
             stroke-dasharray: 10 5 !important;
+        }
+
+        .svg-polygon.hidden {
+            display: none;
+        }
+
+        .block-item.hidden {
+            opacity: 0.4;
+            text-decoration: line-through;
+        }
+
+        .block-name {
+            font-size: 13px;
+            font-weight: 500;
+            flex: 1;
+            min-width: 0;
+        }
+
+        .block-name-input {
+            background: #0f3460;
+            border: 1px solid #4a8aca;
+            color: #fff;
+            font-size: 13px;
+            font-weight: 500;
+            padding: 2px 6px;
+            border-radius: 3px;
+            width: 100%;
+            outline: none;
+        }
+
+        .block-name-input:focus {
+            border-color: #6ab0f0;
+        }
+
+        /* SVG label styles */
+        .svg-label {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-size: 24px;
+            font-weight: bold;
+            fill: white;
+            stroke: black;
+            stroke-width: 3;
+            paint-order: stroke;
+            pointer-events: none;
+            user-select: none;
+        }
+
+        .svg-label.labels-hidden {
+            display: none;
+        }
+
+        .toolbar button.toggle {
+            background: #3a506b;
+        }
+
+        .toolbar button.toggle.active {
+            background: #5a9fd4;
+        }
+
+        .toolbar button.toggle:hover:not(:disabled) {
+            background: #4a6a8b;
+        }
+
+        .toolbar button.toggle.active:hover:not(:disabled) {
+            background: #6ab0e7;
         }
     </style>
 </head>
@@ -339,6 +492,9 @@
         <div class="toolbar">
             <button id="btn-select-all" disabled>Select All</button>
             <button id="btn-deselect" disabled>Deselect</button>
+            <button id="btn-hide" disabled>Hide Selected</button>
+            <button id="btn-show" disabled>Show All</button>
+            <button id="btn-overlay" class="toggle active" disabled>Labels</button>
             <button id="btn-delete" class="danger" disabled>Delete Selected</button>
             <button id="btn-merge" class="merge" disabled>Merge Selected</button>
             <button id="btn-save" class="primary" disabled>Save Changes</button>
@@ -347,11 +503,24 @@
 
     <main>
         <div class="sidebar">
-            <div class="sidebar-header">
-                <span>Blocks</span>
-                <span id="sidebar-count"></span>
+            <div class="sidebar-tabs">
+                <button class="sidebar-tab active" data-tab="blocks">
+                    Blocks<span class="tab-count" id="blocks-count">0</span>
+                </button>
+                <button class="sidebar-tab" data-tab="deleted">
+                    To Delete<span class="tab-count" id="deleted-count">0</span>
+                </button>
             </div>
-            <div class="block-list" id="block-list"></div>
+            <div class="tab-content active" id="tab-blocks">
+                <div class="block-list" id="block-list"></div>
+            </div>
+            <div class="tab-content" id="tab-deleted">
+                <div class="sidebar-header">
+                    <span>Pending deletion</span>
+                    <button id="btn-undelete" class="restore-btn" disabled>Undelete Last</button>
+                </div>
+                <div class="block-list" id="deleted-list"></div>
+            </div>
         </div>
 
         <div class="canvas-container">
@@ -368,10 +537,15 @@
             </div>
 
             <div class="help-text">
-                <kbd>Click</kbd> Select block &nbsp;
+                <kbd>Click</kbd> Select &nbsp;
                 <kbd>Shift+Click</kbd> Multi-select &nbsp;
-                <kbd>Delete</kbd> Delete selected &nbsp;
-                <kbd>M</kbd> Merge selected &nbsp;
+                <kbd>Dbl-Click</kbd> Rename &nbsp;
+                <kbd>Delete</kbd> Delete &nbsp;
+                <kbd>U</kbd> Undelete &nbsp;
+                <kbd>M</kbd> Merge &nbsp;
+                <kbd>H</kbd> Hide &nbsp;
+                <kbd>S</kbd> Show all &nbsp;
+                <kbd>L</kbd> Labels &nbsp;
                 <kbd>Ctrl+S</kbd> Save
             </div>
         </div>
@@ -382,9 +556,14 @@
         let plates = [];
         let currentPlate = null;
         let polygons = [];
+        let deletedPolygons = [];  // Polygons pending deletion
+        let deleteHistory = [];     // Stack of deletion batches for undo
         let selectedIds = new Set();
+        let hiddenIds = new Set();
         let zoom = 0.25;  // Start at 25% zoom for large images
         let hasChanges = false;
+        let showLabels = true;
+        let activeTab = 'blocks';
 
         // DOM elements
         const plateSelect = document.getElementById('plate-select');
@@ -395,12 +574,17 @@
 
         const btnSelectAll = document.getElementById('btn-select-all');
         const btnDeselect = document.getElementById('btn-deselect');
+        const btnHide = document.getElementById('btn-hide');
+        const btnShow = document.getElementById('btn-show');
+        const btnOverlay = document.getElementById('btn-overlay');
         const btnDelete = document.getElementById('btn-delete');
         const btnMerge = document.getElementById('btn-merge');
         const btnSave = document.getElementById('btn-save');
         const btnZoomIn = document.getElementById('btn-zoom-in');
         const btnZoomOut = document.getElementById('btn-zoom-out');
         const btnZoomFit = document.getElementById('btn-zoom-fit');
+        const btnUndelete = document.getElementById('btn-undelete');
+        const deletedList = document.getElementById('deleted-list');
 
         // Initialize
         async function init() {
@@ -442,12 +626,18 @@
                 currentPlate = plate;
                 polygons = data.polygons.map((p, idx) => ({
                     ...p,
-                    originalIndex: idx
+                    originalIndex: idx,
+                    name: p.name || `b-${String(idx + 1).padStart(4, '0')}`
                 }));
+                deletedPolygons = [];
+                deleteHistory = [];
+                hiddenIds.clear();
                 hasChanges = false;
 
                 renderSVG(data);
                 renderBlockList();
+                renderDeletedList();
+                updateTabCounts();
                 updateStatus();
                 updateButtons();
 
@@ -498,6 +688,9 @@
                 if (selectedIds.has(idx)) {
                     polygon.classList.add('selected');
                 }
+                if (hiddenIds.has(idx)) {
+                    polygon.classList.add('hidden');
+                }
 
                 polygon.addEventListener('click', (e) => {
                     e.stopPropagation();
@@ -508,7 +701,56 @@
             });
 
             svgCanvas.appendChild(group);
+
+            // Add labels group
+            const labelsGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+            labelsGroup.id = 'labels';
+
+            polygons.forEach((poly, idx) => {
+                const centroid = calculateCentroid(poly.points);
+                const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                label.setAttribute('x', centroid.x);
+                label.setAttribute('y', centroid.y);
+                label.setAttribute('text-anchor', 'middle');
+                label.setAttribute('dominant-baseline', 'middle');
+                label.setAttribute('data-index', idx);
+                label.classList.add('svg-label');
+                if (!showLabels) {
+                    label.classList.add('labels-hidden');
+                }
+                if (hiddenIds.has(idx)) {
+                    label.classList.add('labels-hidden');
+                }
+                label.textContent = poly.name || `b-${String(idx + 1).padStart(4, '0')}`;
+
+                labelsGroup.appendChild(label);
+            });
+
+            svgCanvas.appendChild(labelsGroup);
             applyZoom();
+        }
+
+        function calculateCentroid(pointsStr) {
+            const points = [];
+            for (const pair of pointsStr.trim().split(/\s+/)) {
+                if (pair.includes(',')) {
+                    const [x, y] = pair.split(',').map(Number);
+                    if (!isNaN(x) && !isNaN(y)) {
+                        points.push({ x, y });
+                    }
+                }
+            }
+
+            if (points.length === 0) {
+                return { x: 0, y: 0 };
+            }
+
+            // Simple centroid calculation (average of all points)
+            const sum = points.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }), { x: 0, y: 0 });
+            return {
+                x: Math.round(sum.x / points.length),
+                y: Math.round(sum.y / points.length)
+            };
         }
 
         function renderBlockList() {
@@ -520,25 +762,124 @@
                 if (selectedIds.has(idx)) {
                     item.classList.add('selected');
                 }
+                if (hiddenIds.has(idx)) {
+                    item.classList.add('hidden');
+                }
                 item.dataset.index = idx;
 
                 // Count vertices
                 const vertexCount = (poly.points.match(/,/g) || []).length;
+                const displayName = poly.name || `b-${String(idx + 1).padStart(4, '0')}`;
 
                 item.innerHTML = `
                     <div class="block-color" style="background: ${poly.stroke || '#666'}"></div>
-                    <span class="block-id">b-${String(idx + 1).padStart(4, '0')}</span>
+                    <span class="block-name" data-index="${idx}">${displayName}</span>
                     <span class="block-vertices">${vertexCount} pts</span>
                 `;
 
                 item.addEventListener('click', (e) => {
-                    handlePolygonClick(idx, e.shiftKey);
+                    if (!e.target.classList.contains('block-name-input')) {
+                        handlePolygonClick(idx, e.shiftKey);
+                    }
+                });
+
+                // Double-click to rename
+                const nameSpan = item.querySelector('.block-name');
+                nameSpan.addEventListener('dblclick', (e) => {
+                    e.stopPropagation();
+                    startRenaming(idx, nameSpan);
                 });
 
                 blockList.appendChild(item);
             });
+        }
 
-            document.getElementById('sidebar-count').textContent = polygons.length;
+        function renderDeletedList() {
+            deletedList.innerHTML = '';
+
+            deletedPolygons.forEach((poly, idx) => {
+                const item = document.createElement('div');
+                item.className = 'deleted-item';
+                item.dataset.index = idx;
+
+                const vertexCount = (poly.points.match(/,/g) || []).length;
+                const displayName = poly.name || 'unnamed';
+
+                item.innerHTML = `
+                    <div class="block-color" style="background: ${poly.stroke || '#666'}"></div>
+                    <span class="block-name">${displayName}</span>
+                    <span class="block-vertices">${vertexCount} pts</span>
+                    <button class="restore-btn" data-index="${idx}">Restore</button>
+                `;
+
+                // Restore button handler
+                item.querySelector('.restore-btn').addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    restorePolygon(idx);
+                });
+
+                deletedList.appendChild(item);
+            });
+        }
+
+        function updateTabCounts() {
+            document.getElementById('blocks-count').textContent = polygons.length;
+            document.getElementById('deleted-count').textContent = deletedPolygons.length;
+        }
+
+        function switchTab(tabName) {
+            activeTab = tabName;
+
+            // Update tab buttons
+            document.querySelectorAll('.sidebar-tab').forEach(tab => {
+                tab.classList.toggle('active', tab.dataset.tab === tabName);
+            });
+
+            // Update tab content
+            document.getElementById('tab-blocks').classList.toggle('active', tabName === 'blocks');
+            document.getElementById('tab-deleted').classList.toggle('active', tabName === 'deleted');
+        }
+
+        function startRenaming(idx, nameSpan) {
+            const poly = polygons[idx];
+            const currentName = poly.name || `b-${String(idx + 1).padStart(4, '0')}`;
+
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.className = 'block-name-input';
+            input.value = currentName;
+
+            nameSpan.innerHTML = '';
+            nameSpan.appendChild(input);
+            input.focus();
+            input.select();
+
+            const finishRenaming = () => {
+                const newName = input.value.trim() || `b-${String(idx + 1).padStart(4, '0')}`;
+                if (newName !== currentName) {
+                    polygons[idx].name = newName;
+                    hasChanges = true;
+                    updateButtons();
+
+                    // Update SVG label
+                    const label = document.querySelector(`.svg-label[data-index="${idx}"]`);
+                    if (label) {
+                        label.textContent = newName;
+                    }
+                }
+                nameSpan.textContent = newName;
+            };
+
+            input.addEventListener('blur', finishRenaming);
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    input.blur();
+                } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    nameSpan.textContent = currentName;
+                }
+            });
         }
 
         function handlePolygonClick(index, multiSelect) {
@@ -565,12 +906,21 @@
             document.querySelectorAll('.svg-polygon').forEach(poly => {
                 const idx = parseInt(poly.dataset.index);
                 poly.classList.toggle('selected', selectedIds.has(idx));
+                poly.classList.toggle('hidden', hiddenIds.has(idx));
+            });
+
+            // Update SVG labels
+            document.querySelectorAll('.svg-label').forEach(label => {
+                const idx = parseInt(label.dataset.index);
+                const isHidden = hiddenIds.has(idx);
+                label.classList.toggle('labels-hidden', !showLabels || isHidden);
             });
 
             // Update block list
             document.querySelectorAll('.block-item').forEach(item => {
                 const idx = parseInt(item.dataset.index);
                 item.classList.toggle('selected', selectedIds.has(idx));
+                item.classList.toggle('hidden', hiddenIds.has(idx));
 
                 // Scroll into view if selected
                 if (selectedIds.has(idx) && selectedIds.size === 1) {
@@ -605,12 +955,18 @@
             const hasSelection = selectedIds.size > 0;
             const canMerge = selectedIds.size >= 2;
             const hasPlate = currentPlate !== null;
+            const hasHidden = hiddenIds.size > 0;
+            const canUndo = deleteHistory.length > 0;
 
             btnSelectAll.disabled = !hasPlate || polygons.length === 0;
             btnDeselect.disabled = !hasSelection;
+            btnHide.disabled = !hasSelection;
+            btnShow.disabled = !hasHidden;
+            btnOverlay.disabled = !hasPlate;
             btnDelete.disabled = !hasSelection;
             btnMerge.disabled = !canMerge;
             btnSave.disabled = !hasChanges;
+            btnUndelete.disabled = !canUndo;
         }
 
         function selectAll() {
@@ -624,12 +980,73 @@
             updateSelection();
         }
 
+        function hideSelected() {
+            if (selectedIds.size === 0) return;
+
+            const count = selectedIds.size;
+            selectedIds.forEach(idx => hiddenIds.add(idx));
+            selectedIds.clear();
+            updateSelection();
+
+            showToast(`Hidden ${count} block(s)`, 'success');
+        }
+
+        function showAll() {
+            if (hiddenIds.size === 0) return;
+
+            const count = hiddenIds.size;
+            hiddenIds.clear();
+            updateSelection();
+
+            showToast(`Showing ${count} block(s)`, 'success');
+        }
+
+        function toggleLabels() {
+            showLabels = !showLabels;
+            btnOverlay.classList.toggle('active', showLabels);
+
+            document.querySelectorAll('.svg-label').forEach(label => {
+                const idx = parseInt(label.dataset.index);
+                const isHidden = hiddenIds.has(idx);
+                label.classList.toggle('labels-hidden', !showLabels || isHidden);
+            });
+        }
+
         function deleteSelected() {
             if (selectedIds.size === 0) return;
 
             const count = selectedIds.size;
+            const deletedIndices = Array.from(selectedIds).sort((a, b) => a - b);
+
+            // Move selected polygons to deleted list
+            const deletedBatch = [];
+            deletedIndices.forEach(idx => {
+                const poly = polygons[idx];
+                deletedBatch.push({
+                    ...poly,
+                    originalIndex: idx  // Track where it came from for potential restore
+                });
+            });
+
+            // Add to deleted list and history
+            deletedPolygons.push(...deletedBatch);
+            deleteHistory.push({
+                count: deletedBatch.length,
+                startIndex: deletedPolygons.length - deletedBatch.length
+            });
+
+            // Build new hidden indices after deletion
+            const newHiddenIds = new Set();
+            hiddenIds.forEach(hiddenIdx => {
+                if (!selectedIds.has(hiddenIdx)) {
+                    const offset = deletedIndices.filter(d => d < hiddenIdx).length;
+                    newHiddenIds.add(hiddenIdx - offset);
+                }
+            });
+
             polygons = polygons.filter((_, idx) => !selectedIds.has(idx));
             selectedIds.clear();
+            hiddenIds = newHiddenIds;
             hasChanges = true;
 
             renderSVG({
@@ -637,10 +1054,61 @@
                 height: svgCanvas.getAttribute('height')
             });
             renderBlockList();
+            renderDeletedList();
+            updateTabCounts();
             updateStatus();
             updateButtons();
 
-            showToast(`Deleted ${count} block(s)`, 'success');
+            showToast(`Moved ${count} block(s) to delete queue`, 'success');
+        }
+
+        function restorePolygon(deletedIdx) {
+            if (deletedIdx < 0 || deletedIdx >= deletedPolygons.length) return;
+
+            const poly = deletedPolygons[deletedIdx];
+            deletedPolygons.splice(deletedIdx, 1);
+
+            // Clear the history since we're manually restoring
+            deleteHistory = [];
+
+            // Add back to polygons
+            polygons.push(poly);
+            hasChanges = true;
+
+            renderSVG({
+                width: svgCanvas.getAttribute('width'),
+                height: svgCanvas.getAttribute('height')
+            });
+            renderBlockList();
+            renderDeletedList();
+            updateTabCounts();
+            updateStatus();
+            updateButtons();
+
+            showToast(`Restored "${poly.name || 'block'}"`, 'success');
+        }
+
+        function undoDelete() {
+            if (deleteHistory.length === 0) return;
+
+            const lastBatch = deleteHistory.pop();
+            const restoredPolygons = deletedPolygons.splice(lastBatch.startIndex, lastBatch.count);
+
+            // Add back to polygons
+            polygons.push(...restoredPolygons);
+            hasChanges = true;
+
+            renderSVG({
+                width: svgCanvas.getAttribute('width'),
+                height: svgCanvas.getAttribute('height')
+            });
+            renderBlockList();
+            renderDeletedList();
+            updateTabCounts();
+            updateStatus();
+            updateButtons();
+
+            showToast(`Restored ${lastBatch.count} block(s)`, 'success');
         }
 
         async function mergeSelected() {
@@ -667,6 +1135,16 @@
                     // Get color from first selected polygon
                     const firstSelected = polygons[selectedIndices[0]];
 
+                    // Build new hidden indices after merge
+                    const newHiddenIds = new Set();
+                    hiddenIds.forEach(hiddenIdx => {
+                        if (!selectedIds.has(hiddenIdx)) {
+                            // Count how many merged items are before this index
+                            const offset = selectedIndices.filter(d => d < hiddenIdx).length;
+                            newHiddenIds.add(hiddenIdx - offset);
+                        }
+                    });
+
                     // Remove selected polygons
                     polygons = polygons.filter((_, idx) => !selectedIds.has(idx));
 
@@ -681,6 +1159,7 @@
                     });
 
                     selectedIds.clear();
+                    hiddenIds = newHiddenIds;
                     hasChanges = true;
 
                     renderSVG({
@@ -803,19 +1282,34 @@
                         return;
                     }
                     selectedIds.clear();
+                    hiddenIds.clear();
+                    deletedPolygons = [];
+                    deleteHistory = [];
+                    switchTab('blocks');
                     loadPlate(parseInt(idx));
                 }
             });
 
             btnSelectAll.addEventListener('click', selectAll);
             btnDeselect.addEventListener('click', deselectAll);
+            btnHide.addEventListener('click', hideSelected);
+            btnShow.addEventListener('click', showAll);
+            btnOverlay.addEventListener('click', toggleLabels);
             btnDelete.addEventListener('click', deleteSelected);
             btnMerge.addEventListener('click', mergeSelected);
             btnSave.addEventListener('click', saveChanges);
+            btnUndelete.addEventListener('click', undoDelete);
 
             btnZoomIn.addEventListener('click', zoomIn);
             btnZoomOut.addEventListener('click', zoomOut);
             btnZoomFit.addEventListener('click', fitToView);
+
+            // Tab switching
+            document.querySelectorAll('.sidebar-tab').forEach(tab => {
+                tab.addEventListener('click', () => {
+                    switchTab(tab.dataset.tab);
+                });
+            });
 
             // Keyboard shortcuts
             document.addEventListener('keydown', (e) => {
@@ -824,9 +1318,21 @@
                 if (e.key === 'Delete' || e.key === 'Backspace') {
                     e.preventDefault();
                     deleteSelected();
+                } else if (e.key === 'u' || e.key === 'U') {
+                    e.preventDefault();
+                    undoDelete();
                 } else if (e.key === 'm' || e.key === 'M') {
                     e.preventDefault();
                     mergeSelected();
+                } else if (e.key === 'h' || e.key === 'H') {
+                    e.preventDefault();
+                    hideSelected();
+                } else if (e.key === 's' && !(e.ctrlKey || e.metaKey)) {
+                    e.preventDefault();
+                    showAll();
+                } else if (e.key === 'l' || e.key === 'L') {
+                    e.preventDefault();
+                    toggleLabels();
                 } else if ((e.ctrlKey || e.metaKey) && e.key === 's') {
                     e.preventDefault();
                     saveChanges();

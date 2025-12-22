@@ -185,13 +185,18 @@ def load_svg_data(svg_path: str) -> dict:
                 points_str = elem.get('points', '')
                 fill = elem.get('fill', 'rgba(100,100,200,0.3)')
                 stroke = elem.get('stroke', 'rgb(100,100,200)')
+                name = elem.get('data-name', '')
 
-                polygons.append({
+                poly_data = {
                     "id": block_id,
                     "points": points_str,
                     "fill": fill,
                     "stroke": stroke
-                })
+                }
+                if name:
+                    poly_data["name"] = name
+
+                polygons.append(poly_data)
 
     return {
         "width": width,
@@ -223,6 +228,10 @@ def save_svg_data(svg_path: str, polygons: list[dict]) -> bool:
         for idx, poly_data in enumerate(polygons, 1):
             block_id = f"{idx:04d}"
 
+            # Get custom name or default to block ID format
+            custom_name = poly_data.get('name', '')
+            display_name = custom_name if custom_name else f"b-{block_id}"
+
             # Create polygon element
             polygon = ET.SubElement(blocks_group, 'polygon')
             polygon.set('points', poly_data['points'])
@@ -230,6 +239,8 @@ def save_svg_data(svg_path: str, polygons: list[dict]) -> bool:
             polygon.set('stroke', poly_data.get('stroke', 'rgb(102,179,92)'))
             polygon.set('stroke-width', '2')
             polygon.set('data-block-id', block_id)
+            if custom_name:
+                polygon.set('data-name', custom_name)
 
             # Calculate centroid for label
             points = parse_polygon_points(poly_data['points'])
@@ -248,7 +259,7 @@ def save_svg_data(svg_path: str, polygons: list[dict]) -> bool:
                 text.set('stroke', 'white')
                 text.set('stroke-width', '3')
                 text.set('paint-order', 'stroke')
-                text.text = f"b-{block_id}.svg"
+                text.text = display_name
 
         # Write back
         tree.write(svg_path, encoding='unicode', xml_declaration=True)
