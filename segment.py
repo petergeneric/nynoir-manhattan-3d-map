@@ -70,6 +70,24 @@ class BoundingBox:
         return (slice(self.y, self.y + self.height),
                 slice(self.x, self.x + self.width))
 
+    def expand(self, factor: float) -> 'BoundingBox':
+        """Return a new BoundingBox expanded by the given factor.
+
+        Args:
+            factor: Expansion factor (e.g., 0.1 for 10% expansion on each edge)
+
+        Returns:
+            New BoundingBox expanded by factor on all sides
+        """
+        expand_x = int(self.width * factor)
+        expand_y = int(self.height * factor)
+        return BoundingBox(
+            x=self.x - expand_x,
+            y=self.y - expand_y,
+            width=self.width + 2 * expand_x,
+            height=self.height + 2 * expand_y
+        )
+
 
 @dataclass
 class Block:
@@ -295,9 +313,73 @@ def load_image(image_path: Path) -> np.ndarray:
 
 
 def extract_region(image: np.ndarray, bbox: BoundingBox) -> np.ndarray:
-    """Extract a rectangular region from an image."""
+    """Extract a rectangular region from an image.
+
+    Simple extraction using numpy slicing. Does not handle out-of-bounds.
+    """
     y_slice, x_slice = bbox.to_slice()
     return image[y_slice, x_slice].copy()
+
+
+def extract_region_with_bounds(
+    image: np.ndarray,
+    bbox: BoundingBox,
+    expansion_factor: float = 0.1
+) -> np.ndarray:
+    """Extract a rectangular region with expansion and bounds handling.
+
+    Expands the bounding box by the given factor, handles cases where the
+    expanded box extends beyond image boundaries by padding with transparent
+    pixels, and returns an RGBA image with transparency outside the expanded box.
+
+    Args:
+        image: Source image (BGR or BGRA format)
+        bbox: Original bounding box to extract
+        expansion_factor: How much to expand the bbox (0.1 = 10% on each edge)
+
+    Returns:
+        RGBA image with the extracted region, transparent padding where needed
+    """
+    img_height, img_width = image.shape[:2]
+
+    # Expand the bounding box
+    expanded = bbox.expand(expansion_factor)
+
+    # Calculate the intersection with image bounds
+    src_x1 = max(0, expanded.x)
+    src_y1 = max(0, expanded.y)
+    src_x2 = min(img_width, expanded.x + expanded.width)
+    src_y2 = min(img_height, expanded.y + expanded.height)
+
+    # Calculate where to place the extracted region in the output
+    dst_x1 = src_x1 - expanded.x
+    dst_y1 = src_y1 - expanded.y
+    dst_x2 = dst_x1 + (src_x2 - src_x1)
+    dst_y2 = dst_y1 + (src_y2 - src_y1)
+
+    # Create output RGBA image (transparent by default)
+    output = np.zeros((expanded.height, expanded.width, 4), dtype=np.uint8)
+
+    # Extract the valid region from source image
+    if src_x2 > src_x1 and src_y2 > src_y1:
+        region = image[src_y1:src_y2, src_x1:src_x2]
+
+        # Convert to RGBA if needed
+        if len(region.shape) == 2:
+            # Grayscale
+            region_rgba = cv2.cvtColor(region, cv2.COLOR_GRAY2RGBA)
+        elif region.shape[2] == 3:
+            # BGR -> BGRA
+            region_rgba = cv2.cvtColor(region, cv2.COLOR_BGR2BGRA)
+        else:
+            # Already BGRA
+            region_rgba = region.copy()
+
+        # Place the region in the output with full opacity
+        region_rgba[:, :, 3] = 255
+        output[dst_y1:dst_y2, dst_x1:dst_x2] = region_rgba
+
+    return output
 
 
 def generate_svg(sam_result: list, width: int, height: int, output_path: Path) -> None:
@@ -1103,14 +1185,15 @@ def process_extract(svg_path: Path) -> Path:
     print(f"\nExtracting {total_blocks} block images...")
 
     for idx, block in enumerate(renumbered_blocks, 1):
-        # Extract block region from original image
-        block_image_bgr = extract_region(image_bgr, block.bbox)
+        # Extract block region with 10% expansion and bounds handling
+        block_image_rgba = extract_region_with_bounds(image_bgr, block.bbox, expansion_factor=0.1)
 
-        # Save as PNG
+        # Save as PNG (with alpha channel for transparency)
         image_path = output_dir / block.image_filename
-        cv2.imwrite(str(image_path), block_image_bgr)
+        cv2.imwrite(str(image_path), block_image_rgba)
 
-        print(f"  [{idx}/{total_blocks}] {block.image_filename} ({block.bbox.width}x{block.bbox.height})")
+        expanded = block.bbox.expand(0.1)
+        print(f"  [{idx}/{total_blocks}] {block.image_filename} ({expanded.width}x{expanded.height})")
 
     print(f"\nExtract complete!")
     print(f"Output: {output_dir}")
