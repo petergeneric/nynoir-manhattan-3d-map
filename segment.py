@@ -75,6 +75,14 @@ class Block:
     bbox: BoundingBox
     contours: List[np.ndarray]
     color: Tuple[int, int, int]
+    name: Optional[str] = None       # Optional name from data-name attribute
+
+    @property
+    def svg_filename(self) -> str:
+        """Return the SVG filename for this block."""
+        if self.name:
+            return f"{self.name}.svg"
+        return f"b-{self.id}.svg"
 
 
 @dataclass
@@ -174,6 +182,7 @@ def parse_plate_svg(svg_path: Path) -> Tuple[PlateMetadata, List[Block]]:
     for polygon in root.iter():
         if polygon.tag.endswith('polygon') and polygon.get('data-block-id'):
             block_id = polygon.get('data-block-id')
+            block_name = polygon.get('data-name')  # Optional name attribute
             points_str = polygon.get('points')
             if not points_str:
                 continue
@@ -197,7 +206,8 @@ def parse_plate_svg(svg_path: Path) -> Tuple[PlateMetadata, List[Block]]:
                 id=block_id,
                 bbox=bbox,
                 contours=[contour],
-                color=color
+                color=color,
+                name=block_name
             ))
 
     # Sort by area (largest first) for consistent ordering
@@ -513,7 +523,6 @@ def generate_plate_svg(
         r, g, b = block.color
         fill_color = f"rgba({r},{g},{b},0.3)"  # Lighter fill for overview
         stroke_color = f"rgb({r},{g},{b})"
-        filename = f"b-{block.id}.svg"
 
         for contour in block.contours:
             if len(contour) < 3:
@@ -536,7 +545,7 @@ def generate_plate_svg(
             f'    <text x="{label_x}" y="{label_y}" '
             f'text-anchor="middle" dominant-baseline="middle" '
             f'class="block-label" fill="{stroke_color}" stroke="white" stroke-width="3" paint-order="stroke">'
-            f'{filename}</text>'
+            f'{block.svg_filename}</text>'
         )
 
     svg_parts.append('  </g>')
@@ -622,7 +631,6 @@ def generate_combined_svg(plate: PlateSegmentation, output_path: Path) -> None:
 
     # Reference each block SVG
     for block in plate.blocks:
-        block_svg_name = f"b-{block.id}.svg"
         svg_parts.append(
             f'  <g id="block-{block.id}" '
             f'transform="translate({block.bbox.x},{block.bbox.y})">'
@@ -632,7 +640,7 @@ def generate_combined_svg(plate: PlateSegmentation, output_path: Path) -> None:
             f'at ({block.bbox.x},{block.bbox.y}) -->'
         )
         svg_parts.append(
-            f'    <image href="{block_svg_name}" '
+            f'    <image href="{block.svg_filename}" '
             f'width="{block.bbox.width}" height="{block.bbox.height}"/>'
         )
         svg_parts.append('  </g>')
@@ -764,7 +772,7 @@ def process_stage2(svg_path: Path, sam_model) -> None:
     # Determine output directory (same as plate.svg location)
     output_dir = svg_path.parent
 
-    # Renumber blocks sequentially
+    # Renumber blocks sequentially (preserve name if present)
     renumbered_blocks = []
     for idx, block in enumerate(blocks, 1):
         new_id = f"{idx:04d}"
@@ -772,7 +780,8 @@ def process_stage2(svg_path: Path, sam_model) -> None:
             id=new_id,
             bbox=block.bbox,
             contours=block.contours,
-            color=block.color
+            color=block.color,
+            name=block.name
         ))
 
     # Update plate with renumbered blocks for combined SVG
@@ -804,11 +813,11 @@ def process_stage2(svg_path: Path, sam_model) -> None:
             block.bbox
         )
 
-        # Generate block SVG
-        block_svg_path = output_dir / f"b-{block.id}.svg"
+        # Generate block SVG (use data-name if available, otherwise b-{id})
+        block_svg_path = output_dir / block.svg_filename
         generate_block_svg(block_seg, block_svg_path)
 
-        print(f"    Found {len(block_seg.contours)} segments in block {block.id}")
+        print(f"    Found {len(block_seg.contours)} segments in block {block.id} -> {block.svg_filename}")
 
     # Generate combined SVG
     print("Generating combined segmentation.svg...")
