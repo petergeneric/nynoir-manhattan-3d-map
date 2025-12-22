@@ -4,6 +4,8 @@
 .DS_Store
 *.pth
 
+__pycache__/
+
 # Block SVGs
 b-0*.svg
 
