@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NYC Block - 1920s Buildings</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            overflow: hidden;
+        }
+        #container {
+            width: 100vw;
+            height: 100vh;
+        }
+        #info {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0,0,0,0.7);
+            padding: 15px 20px;
+            border-radius: 8px;
+            z-index: 100;
+        }
+        #info h1 {
+            font-size: 1.2rem;
+            margin-bottom: 8px;
+        }
+        #info p {
+            font-size: 0.85rem;
+            color: #aaa;
+        }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 1.2rem;
+            color: #888;
+        }
+    </style>
+</head>
+<body>
+    <div id="info">
+        <h1>1920s NYC Block</h1>
+        <p>Drag to rotate, scroll to zoom</p>
+    </div>
+    <div id="loading">Loading model...</div>
+    <div id="container"></div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // Scene setup
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x1a1a2e);
+
+        // Camera
+        const camera = new THREE.PerspectiveCamera(
+            45,
+            window.innerWidth / window.innerHeight,
+            0.1,
+            10000
+        );
+        camera.position.set(800, 600, 800);
+
+        // Renderer
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.shadowMap.enabled = true;
+        document.getElementById('container').appendChild(renderer.domElement);
+
+        // Controls
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0x404040, 0.5);
+        scene.add(ambientLight);
+
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+        directionalLight.position.set(500, 500, 500);
+        directionalLight.castShadow = true;
+        scene.add(directionalLight);
+
+        const directionalLight2 = new THREE.DirectionalLight(0x8888ff, 0.3);
+        directionalLight2.position.set(-500, 300, -500);
+        scene.add(directionalLight2);
+
+        // Ground plane (will be positioned after STL loads)
+        const groundGeometry = new THREE.PlaneGeometry(3000, 3000);
+        const groundMaterial = new THREE.MeshStandardMaterial({
+            color: 0x2a2a3a,
+            roughness: 0.9
+        });
+        const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+        ground.rotation.x = -Math.PI / 2;
+        ground.receiveShadow = true;
+
+        // Load STL
+        const loader = new STLLoader();
+        loader.load(
+            'nyc_block.stl',
+            function (geometry) {
+                document.getElementById('loading').style.display = 'none';
+
+                // Center the geometry
+                geometry.computeBoundingBox();
+                const center = new THREE.Vector3();
+                geometry.boundingBox.getCenter(center);
+                geometry.translate(-center.x, -center.y, -center.z);
+
+                // Rotate to stand upright (STL has Z up, Three.js has Y up)
+                geometry.rotateX(-Math.PI / 2);
+
+                const material = new THREE.MeshStandardMaterial({
+                    color: 0xcc8844,
+                    roughness: 0.6,
+                    metalness: 0.1,
+                    flatShading: true
+                });
+
+                const mesh = new THREE.Mesh(geometry, material);
+                mesh.castShadow = true;
+                mesh.receiveShadow = true;
+                scene.add(mesh);
+
+                // Adjust camera to fit model
+                geometry.computeBoundingBox();
+                const size = new THREE.Vector3();
+                geometry.boundingBox.getSize(size);
+                const maxDim = Math.max(size.x, size.y, size.z);
+                camera.position.set(maxDim, maxDim * 0.8, maxDim);
+                controls.target.set(0, size.y / 4, 0);
+                controls.update();
+
+                // Position ground at the lowest point of the STL
+                ground.position.y = geometry.boundingBox.min.y;
+                scene.add(ground);
+            },
+            function (xhr) {
+                const percent = (xhr.loaded / xhr.total * 100).toFixed(0);
+                document.getElementById('loading').textContent = `Loading... ${percent}%`;
+            },
+            function (error) {
+                document.getElementById('loading').textContent = 'Error loading model';
+                console.error('Error loading STL:', error);
+            }
+        );
+
+        // Animation loop
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // Handle resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
