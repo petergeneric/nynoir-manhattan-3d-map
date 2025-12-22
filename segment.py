@@ -7,6 +7,7 @@ Supports recursive segmentation for atlas plates:
 """
 
 import argparse
+import re
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -546,6 +547,131 @@ def filter_contours_outside_block(
     )
 
 
+# SVG Polygon Culling System
+# Add new cull filter functions here. Each filter takes:
+#   - seg_polygon: ShapelyPolygon of the segment
+#   - block_polygon: ShapelyPolygon of the block boundary
+#   - block_bbox: BoundingBox of the block
+# Returns True to keep the polygon, False to cull it.
+
+def cull_outside_block(
+    seg_polygon: ShapelyPolygon,
+    block_polygon: ShapelyPolygon,
+    block_bbox: BoundingBox
+) -> bool:
+    """Keep polygons that intersect the block boundary."""
+    return block_polygon.intersects(seg_polygon)
+
+
+# Registry of all cull filters to apply (add new filters here)
+CULL_FILTERS = [
+    ("outside_block", cull_outside_block),
+]
+
+
+def parse_svg_polygon_points(points_str: str) -> List[Tuple[float, float]]:
+    """Parse SVG polygon points string into list of (x, y) tuples."""
+    points = []
+    for pair in points_str.strip().split():
+        if ',' in pair:
+            x, y = pair.split(',')
+            points.append((float(x), float(y)))
+    return points
+
+
+def format_svg_polygon_points(points: List[Tuple[float, float]]) -> str:
+    """Format list of (x, y) tuples back to SVG points string."""
+    return " ".join(f"{x},{y}" for x, y in points)
+
+
+def apply_cull_filters_to_block_svg(
+    block_svg_content: str,
+    block_contour: np.ndarray,
+    block_bbox: BoundingBox
+) -> Tuple[str, int, int]:
+    """Apply all cull filters to polygons in a block SVG.
+
+    Args:
+        block_svg_content: The SVG file content as a string
+        block_contour: The block polygon contour in plate coordinates
+        block_bbox: The bounding box of the block
+
+    Returns:
+        Tuple of (filtered_svg_content, original_count, filtered_count)
+    """
+    # Convert block contour to local coordinates and create Shapely polygon
+    block_points = block_contour.squeeze()
+    if len(block_points.shape) == 1 or len(block_points) < 3:
+        # Can't form a valid block polygon, return unchanged
+        return block_svg_content, 0, 0
+
+    local_block_points = [(p[0] - block_bbox.x, p[1] - block_bbox.y) for p in block_points]
+
+    try:
+        block_polygon = ShapelyPolygon(local_block_points)
+        if not block_polygon.is_valid:
+            block_polygon = make_valid(block_polygon)
+    except Exception:
+        return block_svg_content, 0, 0
+
+    # Find all polygon elements
+    polygon_pattern = re.compile(r'<polygon\s+points="([^"]+)"([^/]*)/>')
+    matches = list(polygon_pattern.finditer(block_svg_content))
+    original_count = len(matches)
+
+    # Filter polygons
+    kept_polygons = []
+    for match in matches:
+        points_str = match.group(1)
+        rest_attrs = match.group(2)
+
+        points = parse_svg_polygon_points(points_str)
+        if len(points) < 3:
+            continue
+
+        try:
+            seg_polygon = ShapelyPolygon(points)
+            if not seg_polygon.is_valid:
+                seg_polygon = make_valid(seg_polygon)
+
+            # Apply all cull filters - polygon must pass ALL filters to be kept
+            keep = True
+            for filter_name, filter_func in CULL_FILTERS:
+                if not filter_func(seg_polygon, block_polygon, block_bbox):
+                    keep = False
+                    break
+
+            if keep:
+                kept_polygons.append(match.group(0))
+        except Exception:
+            # If we can't process, skip the polygon
+            continue
+
+    filtered_count = len(kept_polygons)
+
+    # Rebuild the SVG with only kept polygons
+    # Extract SVG header and closing tag
+    header_match = re.match(r'(<svg[^>]*>)', block_svg_content)
+    if not header_match:
+        return block_svg_content, original_count, filtered_count
+
+    header = header_match.group(1)
+
+    # Extract comment if present
+    comment_match = re.search(r'(<!--[^>]*-->)', block_svg_content)
+    comment = comment_match.group(1) if comment_match else ""
+
+    # Rebuild SVG
+    parts = [header]
+    if comment:
+        parts.append(f"\n  {comment}")
+    for polygon in kept_polygons:
+        parts.append(f"\n  {polygon}")
+    parts.append("\n</svg>")
+
+    return "".join(parts), original_count, filtered_count
+
+
 # SVG Generators
 def generate_plate_svg(
     plate: PlateSegmentation,
@@ -671,14 +797,18 @@ def generate_block_svg(block_seg: BlockSegmentation, output_path: Path) -> None:
 
 
 def generate_combined_svg(plate: PlateSegmentation, output_path: Path) -> None:
-    """Generate combined SVG that references individual block SVGs."""
+    """Generate combined SVG with inlined block content.
+
+    Inlines the polygon content from each block SVG file directly into
+    the combined SVG for maximum compatibility with applications like
+    Affinity Designer that don't support external SVG references.
+    """
     svg_parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" '
-        f'xmlns:xlink="http://www.w3.org/1999/xlink" '
         f'width="{plate.image_width}" height="{plate.image_height}" '
         f'viewBox="0 0 {plate.image_width} {plate.image_height}">',
         '  <!-- Combined segmentation view -->',
-        '  <!-- References individual block SVG files -->',
+        '  <!-- Block content inlined for compatibility -->',
         '',
         '  <!-- Block outline layer (from plate.svg) -->',
         '  <g id="block-outlines" opacity="0.3">',
@@ -707,7 +837,7 @@ def generate_combined_svg(plate: PlateSegmentation, output_path: Path) -> None:
     svg_parts.append('')
     svg_parts.append('  <!-- Detailed block layers -->')
 
-    # Reference each block SVG
+    # Inline content from each block SVG
     for block in plate.blocks:
         svg_parts.append(
             f'  <g id="block-{block.id}" '
@@ -717,10 +847,21 @@ def generate_combined_svg(plate: PlateSegmentation, output_path: Path) -> None:
             f'    <!-- Block {block.id}: {block.bbox.width}x{block.bbox.height} '
             f'at ({block.bbox.x},{block.bbox.y}) -->'
         )
-        svg_parts.append(
-            f'    <image href="{block.svg_filename}" '
-            f'width="{block.bbox.width}" height="{block.bbox.height}"/>'
-        )
+
+        # Read and inline the block SVG content
+        block_svg_path = output_path.parent / block.svg_filename
+        if block_svg_path.exists():
+            with open(block_svg_path, 'r') as f:
+                block_svg_content = f.read()
+
+            # Extract polygon elements from the block SVG
+            # Parse out just the polygon tags (skip the svg wrapper)
+            polygons = re.findall(r'<polygon[^>]+/>', block_svg_content)
+            for polygon in polygons:
+                svg_parts.append(f'    {polygon}')
+        else:
+            svg_parts.append(f'    <!-- Block SVG not found: {block.svg_filename} -->')
+
         svg_parts.append('  </g>')
 
     svg_parts.append('</svg>')
@@ -871,13 +1012,13 @@ def process_stage2(svg_path: Path, sam_model) -> None:
         blocks=renumbered_blocks
     )
 
-    # Process each block
+    # Process each block through SAM
     total_blocks = len(renumbered_blocks)
-    print(f"Processing {total_blocks} blocks...")
+    print(f"\nRunning SAM on {total_blocks} blocks...")
     second_pass_generator = create_mask_generator(sam_model, SECOND_PASS_CONFIG)
 
     for idx, block in enumerate(renumbered_blocks, 1):
-        print(f"  [{idx}/{total_blocks}] Processing block {block.id} ({block.bbox.width}x{block.bbox.height})...")
+        print(f"  [{idx}/{total_blocks}] Block {block.id} ({block.bbox.width}x{block.bbox.height})...")
 
         # Extract block region from original image
         block_image_bgr = extract_region(image_bgr, block.bbox)
@@ -891,26 +1032,111 @@ def process_stage2(svg_path: Path, sam_model) -> None:
             block.bbox
         )
 
-        # Filter out segments that lie entirely outside the block polygon
-        # (SAM segments the full bounding box, but we only want segments within the actual polygon)
-        raw_count = len(block_seg.contours)
-        if block.contours:
-            block_seg = filter_contours_outside_block(block_seg, block.contours[0], block.bbox)
-        filtered_count = len(block_seg.contours)
-
-        # Generate block SVG (use data-name if available, otherwise b-{id})
+        # Write unfiltered block SVG (culling is done by process_combine)
         block_svg_path = output_dir / block.svg_filename
         generate_block_svg(block_seg, block_svg_path)
 
-        print(f"    Found {filtered_count} segments in block {block.id} -> {block.svg_filename} (filtered {raw_count - filtered_count} outside polygon)")
+        print(f"    {len(block_seg.contours)} raw segments -> {block.svg_filename}")
 
-    # Generate combined SVG
-    print("Generating combined segmentation.svg...")
-    segmentation_svg_path = output_dir / "segmentation.svg"
-    generate_combined_svg(plate, segmentation_svg_path)
+    # Apply cull filters and generate combined SVG
+    print("\n" + "=" * 50)
+    process_combine(svg_path, apply_culling=True)
 
     print(f"\nStage 2 complete!")
     print(f"Output files in: {output_dir}")
+
+
+def process_combine(svg_path: Path, apply_culling: bool = True) -> None:
+    """Combine existing block SVGs into segmentation.svg without running SAM.
+
+    Reads plate.svg metadata and block definitions, applies cull filters
+    to each block SVG, rewrites them, then combines into segmentation.svg.
+
+    Args:
+        svg_path: Path to plate.svg file
+        apply_culling: Whether to apply cull filters to block SVGs (default True)
+    """
+    print(f"Combine: Processing {svg_path}")
+
+    # Parse plate.svg to get metadata and blocks
+    print("Parsing plate.svg...")
+    metadata, blocks = parse_plate_svg(svg_path)
+    print(f"Found {len(blocks)} blocks in SVG")
+
+    # Determine output directory (same as plate.svg location)
+    output_dir = svg_path.parent
+
+    # Renumber blocks sequentially (matching stage2 behavior)
+    renumbered_blocks = []
+    missing_blocks = []
+    total_culled = 0
+
+    print("\nProcessing block SVGs...")
+    for idx, block in enumerate(blocks, 1):
+        new_id = f"{idx:04d}"
+        new_block = Block(
+            id=new_id,
+            bbox=block.bbox,
+            contours=block.contours,
+            color=block.color,
+            name=block.name
+        )
+        renumbered_blocks.append(new_block)
+
+        # Check if block SVG exists
+        block_svg_path = output_dir / new_block.svg_filename
+        if block_svg_path.exists():
+            if apply_culling and new_block.contours:
+                # Apply cull filters
+                with open(block_svg_path, 'r') as f:
+                    block_svg_content = f.read()
+
+                filtered_content, orig_count, filt_count = apply_cull_filters_to_block_svg(
+                    block_svg_content,
+                    new_block.contours[0],
+                    new_block.bbox
+                )
+
+                culled = orig_count - filt_count
+                total_culled += culled
+
+                # Rewrite the block SVG with filtered content
+                with open(block_svg_path, 'w') as f:
+                    f.write(filtered_content)
+
+                if culled > 0:
+                    print(f"  {new_block.svg_filename}: {filt_count} polygons (culled {culled})")
+                else:
+                    print(f"  {new_block.svg_filename}: {filt_count} polygons")
+            else:
+                print(f"  {new_block.svg_filename}: found")
+        else:
+            missing_blocks.append(new_block.svg_filename)
+            print(f"  {new_block.svg_filename}: MISSING")
+
+    if missing_blocks:
+        print(f"\nWarning: {len(missing_blocks)} block SVG(s) not found on disk.")
+        print("These blocks will show as empty in the combined SVG.")
+
+    if apply_culling and total_culled > 0:
+        print(f"\nCulled {total_culled} total polygons across all blocks.")
+
+    # Create plate structure for combined SVG
+    plate = PlateSegmentation(
+        volume=metadata.volume,
+        plate_id=metadata.plate_id,
+        image_width=metadata.image_width,
+        image_height=metadata.image_height,
+        blocks=renumbered_blocks
+    )
+
+    # Generate combined SVG
+    print("\nGenerating combined segmentation.svg...")
+    segmentation_svg_path = output_dir / "segmentation.svg"
+    generate_combined_svg(plate, segmentation_svg_path)
+
+    print(f"\nCombine complete!")
+    print(f"Output: {segmentation_svg_path}")
 
 
 # Main Recursive Workflow (Legacy)
@@ -1068,6 +1294,13 @@ def main():
         help="Force use of MPS (Apple Silicon GPU)"
     )
 
+    # Combine subcommand
+    combine_parser = subparsers.add_parser(
+        "combine",
+        help="Regenerate segmentation.svg from existing block SVGs (no SAM)"
+    )
+    combine_parser.add_argument("svg", help="Path to plate.svg file")
+
     # Legacy mode (no subcommand) - runs both stages
     parser.add_argument("legacy_input", nargs="?", help="Input image (legacy mode: runs both stages)")
     parser.add_argument(
@@ -1142,12 +1375,22 @@ def main():
         process_stage2(svg_path, sam)
         return 0
 
+    elif args.command == "combine":
+        svg_path = Path(args.svg)
+        if not svg_path.exists():
+            print(f"Error: SVG file not found: {svg_path}")
+            return 1
+
+        process_combine(svg_path)
+        return 0
+
     # Legacy mode (no subcommand)
     if args.legacy_input is None:
         parser.print_help()
         print("\nExamples:")
         print("  Stage 1: uv run python segment.py stage1 /path/to/image.jp2")
         print("  Stage 2: uv run python segment.py stage2 output/vol1/p37/plate.svg")
+        print("  Combine: uv run python segment.py combine output/vol1/p37/plate.svg")
         print("  Both:    uv run python segment.py /path/to/image.jp2")
         return 0
 
