@@ -61,9 +61,34 @@ The `plate.svg` includes:
 - Metadata for Stage 2 (source JP2 path, volume, plate ID, dimensions)
 - Block polygons with `data-block-id` attributes
 
-### Manual Editing
+### Manual Editing (Web Editor)
 
-Open `plate.svg` in an SVG editor (Inkscape, Illustrator, etc.) and:
+Use the built-in web editor for Stage 1 SVG cleanup:
+
+```bash
+# Start the editor (opens at http://localhost:5001)
+uv run python editor.py
+
+# Custom port and directories
+uv run python editor.py --port 8080 --output-dir output --media-dir /path/to/media
+```
+
+The editor provides:
+- Visual display of block polygons over JPEG background image
+- Click to select, Shift+Click for multi-select
+- Delete selected blocks
+- Merge selected blocks (geometric union using Shapely)
+- Save changes back to `plate.svg`
+
+Keyboard shortcuts:
+- `Delete` / `Backspace`: Delete selected
+- `M`: Merge selected
+- `Ctrl+S`: Save changes
+- `Ctrl+A`: Select all
+- `Escape`: Deselect all
+- `+` / `-` / `0`: Zoom in / out / fit
+
+Alternatively, open `plate.svg` in an SVG editor (Inkscape, Illustrator, etc.) and:
 - Delete incorrect block detections
 - Merge overlapping blocks
 - Adjust polygon boundaries
@@ -121,6 +146,8 @@ Key dependencies:
 - `torch`/`torchvision`: PyTorch for model inference
 - `opencv-python`: Image I/O and contour detection
 - `Pillow`: JP2 fallback support
+- `flask`: Web server for the SVG editor
+- `shapely`: Polygon merging (geometric union)
 
 ## Device Selection
 

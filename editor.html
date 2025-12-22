@@ -1,0 +1,871 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stage 1 SVG Editor</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            background: #16213e;
+            padding: 12px 20px;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            border-bottom: 1px solid #0f3460;
+        }
+
+        header h1 {
+            font-size: 18px;
+            font-weight: 500;
+            color: #e94560;
+        }
+
+        .plate-selector {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .plate-selector label {
+            color: #888;
+            font-size: 14px;
+        }
+
+        .plate-selector select {
+            background: #0f3460;
+            color: #fff;
+            border: 1px solid #1a1a2e;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 14px;
+            min-width: 150px;
+        }
+
+        .toolbar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-left: auto;
+        }
+
+        .toolbar button {
+            background: #0f3460;
+            color: #fff;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            transition: background 0.2s;
+        }
+
+        .toolbar button:hover:not(:disabled) {
+            background: #1a4a7a;
+        }
+
+        .toolbar button:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        .toolbar button.danger {
+            background: #8b0000;
+        }
+
+        .toolbar button.danger:hover:not(:disabled) {
+            background: #a52a2a;
+        }
+
+        .toolbar button.primary {
+            background: #0a8754;
+        }
+
+        .toolbar button.primary:hover:not(:disabled) {
+            background: #0fa968;
+        }
+
+        .toolbar button.merge {
+            background: #6b4ba8;
+        }
+
+        .toolbar button.merge:hover:not(:disabled) {
+            background: #7d5cc0;
+        }
+
+        .status {
+            font-size: 13px;
+            color: #888;
+            padding: 0 10px;
+        }
+
+        .status .count {
+            color: #e94560;
+            font-weight: 500;
+        }
+
+        main {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+        }
+
+        .sidebar {
+            width: 280px;
+            background: #16213e;
+            border-right: 1px solid #0f3460;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .sidebar-header {
+            padding: 12px 16px;
+            border-bottom: 1px solid #0f3460;
+            font-size: 13px;
+            color: #888;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .block-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px;
+        }
+
+        .block-item {
+            padding: 10px 12px;
+            background: #1a1a2e;
+            border-radius: 4px;
+            margin-bottom: 6px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            transition: background 0.15s;
+        }
+
+        .block-item:hover {
+            background: #252542;
+        }
+
+        .block-item.selected {
+            background: #2a4a6a;
+            outline: 2px solid #4a8aca;
+        }
+
+        .block-color {
+            width: 16px;
+            height: 16px;
+            border-radius: 3px;
+            flex-shrink: 0;
+        }
+
+        .block-id {
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        .block-vertices {
+            font-size: 11px;
+            color: #666;
+            margin-left: auto;
+        }
+
+        .canvas-container {
+            flex: 1;
+            overflow: hidden;
+            position: relative;
+            background: #111;
+        }
+
+        #canvas-wrapper {
+            width: 100%;
+            height: 100%;
+            overflow: auto;
+            cursor: grab;
+        }
+
+        #canvas-wrapper.dragging {
+            cursor: grabbing;
+        }
+
+        #svg-canvas {
+            display: block;
+            transform-origin: 0 0;
+        }
+
+        .zoom-controls {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            display: flex;
+            gap: 8px;
+            background: rgba(22, 33, 62, 0.9);
+            padding: 8px;
+            border-radius: 6px;
+        }
+
+        .zoom-controls button {
+            background: #0f3460;
+            color: #fff;
+            border: none;
+            width: 36px;
+            height: 36px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 18px;
+        }
+
+        .zoom-controls button:hover {
+            background: #1a4a7a;
+        }
+
+        .zoom-level {
+            display: flex;
+            align-items: center;
+            padding: 0 10px;
+            font-size: 13px;
+            color: #888;
+        }
+
+        .help-text {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(22, 33, 62, 0.9);
+            padding: 12px 16px;
+            border-radius: 6px;
+            font-size: 12px;
+            color: #888;
+            line-height: 1.6;
+        }
+
+        .help-text kbd {
+            background: #0f3460;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: monospace;
+            color: #ccc;
+        }
+
+        .loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #888;
+            font-size: 16px;
+        }
+
+        .toast {
+            position: fixed;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #16213e;
+            color: #fff;
+            padding: 12px 24px;
+            border-radius: 6px;
+            font-size: 14px;
+            z-index: 1000;
+            animation: fadeInOut 3s ease-in-out;
+            border: 1px solid #0f3460;
+        }
+
+        .toast.success {
+            border-color: #0a8754;
+        }
+
+        .toast.error {
+            border-color: #8b0000;
+        }
+
+        @keyframes fadeInOut {
+            0% { opacity: 0; transform: translateX(-50%) translateY(20px); }
+            15% { opacity: 1; transform: translateX(-50%) translateY(0); }
+            85% { opacity: 1; transform: translateX(-50%) translateY(0); }
+            100% { opacity: 0; transform: translateX(-50%) translateY(-20px); }
+        }
+
+        /* SVG polygon styles */
+        .svg-polygon {
+            cursor: pointer;
+            transition: opacity 0.15s;
+        }
+
+        .svg-polygon:hover {
+            opacity: 0.8;
+        }
+
+        .svg-polygon.selected {
+            stroke-width: 4 !important;
+            stroke-dasharray: 10 5 !important;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Stage 1 SVG Editor</h1>
+        <div class="plate-selector">
+            <label>Plate:</label>
+            <select id="plate-select">
+                <option value="">Loading...</option>
+            </select>
+        </div>
+        <div class="status">
+            <span id="block-count"></span>
+            <span id="selection-count"></span>
+        </div>
+        <div class="toolbar">
+            <button id="btn-select-all" disabled>Select All</button>
+            <button id="btn-deselect" disabled>Deselect</button>
+            <button id="btn-delete" class="danger" disabled>Delete Selected</button>
+            <button id="btn-merge" class="merge" disabled>Merge Selected</button>
+            <button id="btn-save" class="primary" disabled>Save Changes</button>
+        </div>
+    </header>
+
+    <main>
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <span>Blocks</span>
+                <span id="sidebar-count"></span>
+            </div>
+            <div class="block-list" id="block-list"></div>
+        </div>
+
+        <div class="canvas-container">
+            <div id="canvas-wrapper">
+                <svg id="svg-canvas"></svg>
+            </div>
+            <div class="loading" id="loading">Select a plate to begin</div>
+
+            <div class="zoom-controls">
+                <button id="btn-zoom-out">-</button>
+                <div class="zoom-level"><span id="zoom-level">100%</span></div>
+                <button id="btn-zoom-in">+</button>
+                <button id="btn-zoom-fit">Fit</button>
+            </div>
+
+            <div class="help-text">
+                <kbd>Click</kbd> Select block &nbsp;
+                <kbd>Shift+Click</kbd> Multi-select &nbsp;
+                <kbd>Delete</kbd> Delete selected &nbsp;
+                <kbd>M</kbd> Merge selected &nbsp;
+                <kbd>Ctrl+S</kbd> Save
+            </div>
+        </div>
+    </main>
+
+    <script>
+        // State
+        let plates = [];
+        let currentPlate = null;
+        let polygons = [];
+        let selectedIds = new Set();
+        let zoom = 0.25;  // Start at 25% zoom for large images
+        let hasChanges = false;
+
+        // DOM elements
+        const plateSelect = document.getElementById('plate-select');
+        const blockList = document.getElementById('block-list');
+        const svgCanvas = document.getElementById('svg-canvas');
+        const canvasWrapper = document.getElementById('canvas-wrapper');
+        const loading = document.getElementById('loading');
+
+        const btnSelectAll = document.getElementById('btn-select-all');
+        const btnDeselect = document.getElementById('btn-deselect');
+        const btnDelete = document.getElementById('btn-delete');
+        const btnMerge = document.getElementById('btn-merge');
+        const btnSave = document.getElementById('btn-save');
+        const btnZoomIn = document.getElementById('btn-zoom-in');
+        const btnZoomOut = document.getElementById('btn-zoom-out');
+        const btnZoomFit = document.getElementById('btn-zoom-fit');
+
+        // Initialize
+        async function init() {
+            await loadPlates();
+            setupEventListeners();
+        }
+
+        async function loadPlates() {
+            try {
+                const response = await fetch('/api/plates');
+                plates = await response.json();
+
+                plateSelect.innerHTML = '<option value="">Select a plate...</option>';
+                plates.forEach((plate, idx) => {
+                    const option = document.createElement('option');
+                    option.value = idx;
+                    option.textContent = `${plate.volume}/${plate.plate_id}`;
+                    if (!plate.has_jpeg) {
+                        option.textContent += ' (no JPEG)';
+                    }
+                    plateSelect.appendChild(option);
+                });
+            } catch (error) {
+                showToast('Failed to load plates', 'error');
+            }
+        }
+
+        async function loadPlate(index) {
+            const plate = plates[index];
+            if (!plate) return;
+
+            loading.textContent = 'Loading...';
+            loading.style.display = 'block';
+
+            try {
+                const response = await fetch(`/api/plate/${plate.volume}/${plate.plate_id}`);
+                const data = await response.json();
+
+                currentPlate = plate;
+                polygons = data.polygons.map((p, idx) => ({
+                    ...p,
+                    originalIndex: idx
+                }));
+                hasChanges = false;
+
+                renderSVG(data);
+                renderBlockList();
+                updateStatus();
+                updateButtons();
+
+                loading.style.display = 'none';
+
+                // Fit to view
+                fitToView();
+
+            } catch (error) {
+                showToast('Failed to load plate', 'error');
+                loading.textContent = 'Failed to load';
+            }
+        }
+
+        function renderSVG(data) {
+            const width = parseInt(data.width) || 1000;
+            const height = parseInt(data.height) || 1000;
+
+            // Clear existing
+            svgCanvas.innerHTML = '';
+            svgCanvas.setAttribute('width', width);
+            svgCanvas.setAttribute('height', height);
+            svgCanvas.setAttribute('viewBox', `0 0 ${width} ${height}`);
+
+            // Add background image
+            if (currentPlate && currentPlate.has_jpeg) {
+                const image = document.createElementNS('http://www.w3.org/2000/svg', 'image');
+                image.setAttribute('href', `/media/${currentPlate.plate_id}.jpeg`);
+                image.setAttribute('width', width);
+                image.setAttribute('height', height);
+                image.setAttribute('opacity', '0.7');
+                svgCanvas.appendChild(image);
+            }
+
+            // Add polygons
+            const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+            group.id = 'polygons';
+
+            polygons.forEach((poly, idx) => {
+                const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+                polygon.setAttribute('points', poly.points);
+                polygon.setAttribute('fill', poly.fill || 'rgba(100,150,200,0.3)');
+                polygon.setAttribute('stroke', poly.stroke || 'rgb(100,150,200)');
+                polygon.setAttribute('stroke-width', '2');
+                polygon.setAttribute('data-index', idx);
+                polygon.classList.add('svg-polygon');
+
+                if (selectedIds.has(idx)) {
+                    polygon.classList.add('selected');
+                }
+
+                polygon.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    handlePolygonClick(idx, e.shiftKey);
+                });
+
+                group.appendChild(polygon);
+            });
+
+            svgCanvas.appendChild(group);
+            applyZoom();
+        }
+
+        function renderBlockList() {
+            blockList.innerHTML = '';
+
+            polygons.forEach((poly, idx) => {
+                const item = document.createElement('div');
+                item.className = 'block-item';
+                if (selectedIds.has(idx)) {
+                    item.classList.add('selected');
+                }
+                item.dataset.index = idx;
+
+                // Count vertices
+                const vertexCount = (poly.points.match(/,/g) || []).length;
+
+                item.innerHTML = `
+                    <div class="block-color" style="background: ${poly.stroke || '#666'}"></div>
+                    <span class="block-id">b-${String(idx + 1).padStart(4, '0')}</span>
+                    <span class="block-vertices">${vertexCount} pts</span>
+                `;
+
+                item.addEventListener('click', (e) => {
+                    handlePolygonClick(idx, e.shiftKey);
+                });
+
+                blockList.appendChild(item);
+            });
+
+            document.getElementById('sidebar-count').textContent = polygons.length;
+        }
+
+        function handlePolygonClick(index, multiSelect) {
+            if (multiSelect) {
+                if (selectedIds.has(index)) {
+                    selectedIds.delete(index);
+                } else {
+                    selectedIds.add(index);
+                }
+            } else {
+                if (selectedIds.has(index) && selectedIds.size === 1) {
+                    selectedIds.clear();
+                } else {
+                    selectedIds.clear();
+                    selectedIds.add(index);
+                }
+            }
+
+            updateSelection();
+        }
+
+        function updateSelection() {
+            // Update SVG polygons
+            document.querySelectorAll('.svg-polygon').forEach(poly => {
+                const idx = parseInt(poly.dataset.index);
+                poly.classList.toggle('selected', selectedIds.has(idx));
+            });
+
+            // Update block list
+            document.querySelectorAll('.block-item').forEach(item => {
+                const idx = parseInt(item.dataset.index);
+                item.classList.toggle('selected', selectedIds.has(idx));
+
+                // Scroll into view if selected
+                if (selectedIds.has(idx) && selectedIds.size === 1) {
+                    item.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                }
+            });
+
+            updateStatus();
+            updateButtons();
+        }
+
+        function updateStatus() {
+            const blockCount = document.getElementById('block-count');
+            const selectionCount = document.getElementById('selection-count');
+
+            blockCount.textContent = `${polygons.length} blocks`;
+
+            if (selectedIds.size > 0) {
+                selectionCount.textContent = ` | ${selectedIds.size} selected`;
+            } else {
+                selectionCount.textContent = '';
+            }
+
+            if (hasChanges) {
+                document.title = '* Stage 1 SVG Editor';
+            } else {
+                document.title = 'Stage 1 SVG Editor';
+            }
+        }
+
+        function updateButtons() {
+            const hasSelection = selectedIds.size > 0;
+            const canMerge = selectedIds.size >= 2;
+            const hasPlate = currentPlate !== null;
+
+            btnSelectAll.disabled = !hasPlate || polygons.length === 0;
+            btnDeselect.disabled = !hasSelection;
+            btnDelete.disabled = !hasSelection;
+            btnMerge.disabled = !canMerge;
+            btnSave.disabled = !hasChanges;
+        }
+
+        function selectAll() {
+            selectedIds.clear();
+            polygons.forEach((_, idx) => selectedIds.add(idx));
+            updateSelection();
+        }
+
+        function deselectAll() {
+            selectedIds.clear();
+            updateSelection();
+        }
+
+        function deleteSelected() {
+            if (selectedIds.size === 0) return;
+
+            const count = selectedIds.size;
+            polygons = polygons.filter((_, idx) => !selectedIds.has(idx));
+            selectedIds.clear();
+            hasChanges = true;
+
+            renderSVG({
+                width: svgCanvas.getAttribute('width'),
+                height: svgCanvas.getAttribute('height')
+            });
+            renderBlockList();
+            updateStatus();
+            updateButtons();
+
+            showToast(`Deleted ${count} block(s)`, 'success');
+        }
+
+        async function mergeSelected() {
+            if (selectedIds.size < 2) return;
+
+            // Get selected polygon points
+            const selectedPolygons = [];
+            const selectedIndices = Array.from(selectedIds).sort((a, b) => a - b);
+
+            selectedIndices.forEach(idx => {
+                selectedPolygons.push(polygons[idx].points);
+            });
+
+            try {
+                const response = await fetch('/api/merge', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ polygons: selectedPolygons })
+                });
+
+                const result = await response.json();
+
+                if (result.success && result.merged_polygons.length > 0) {
+                    // Get color from first selected polygon
+                    const firstSelected = polygons[selectedIndices[0]];
+
+                    // Remove selected polygons
+                    polygons = polygons.filter((_, idx) => !selectedIds.has(idx));
+
+                    // Add merged polygon(s)
+                    result.merged_polygons.forEach(points => {
+                        polygons.push({
+                            id: 'merged',
+                            points: points,
+                            fill: firstSelected.fill,
+                            stroke: firstSelected.stroke
+                        });
+                    });
+
+                    selectedIds.clear();
+                    hasChanges = true;
+
+                    renderSVG({
+                        width: svgCanvas.getAttribute('width'),
+                        height: svgCanvas.getAttribute('height')
+                    });
+                    renderBlockList();
+                    updateStatus();
+                    updateButtons();
+
+                    showToast(`Merged ${selectedIndices.length} blocks into ${result.merged_polygons.length}`, 'success');
+                } else {
+                    showToast('Merge failed: ' + (result.error || 'Unknown error'), 'error');
+                }
+            } catch (error) {
+                showToast('Merge failed: ' + error.message, 'error');
+            }
+        }
+
+        async function saveChanges() {
+            if (!currentPlate || !hasChanges) return;
+
+            try {
+                const response = await fetch(`/api/plate/${currentPlate.volume}/${currentPlate.plate_id}/save`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ polygons: polygons })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    hasChanges = false;
+                    updateStatus();
+                    updateButtons();
+                    showToast(`Saved ${result.polygon_count} blocks`, 'success');
+                } else {
+                    showToast('Save failed: ' + result.error, 'error');
+                }
+            } catch (error) {
+                showToast('Save failed: ' + error.message, 'error');
+            }
+        }
+
+        // Zoom controls
+        function applyZoom() {
+            svgCanvas.style.transform = `scale(${zoom})`;
+            document.getElementById('zoom-level').textContent = `${Math.round(zoom * 100)}%`;
+        }
+
+        function zoomIn() {
+            zoom = Math.min(zoom * 1.25, 4);
+            applyZoom();
+        }
+
+        function zoomOut() {
+            zoom = Math.max(zoom / 1.25, 0.05);
+            applyZoom();
+        }
+
+        function fitToView() {
+            const containerWidth = canvasWrapper.clientWidth;
+            const containerHeight = canvasWrapper.clientHeight;
+            const svgWidth = parseInt(svgCanvas.getAttribute('width')) || 1000;
+            const svgHeight = parseInt(svgCanvas.getAttribute('height')) || 1000;
+
+            const scaleX = containerWidth / svgWidth;
+            const scaleY = containerHeight / svgHeight;
+            zoom = Math.min(scaleX, scaleY) * 0.95;
+            applyZoom();
+        }
+
+        // Pan controls
+        let isPanning = false;
+        let panStartX, panStartY;
+        let scrollStartX, scrollStartY;
+
+        canvasWrapper.addEventListener('mousedown', (e) => {
+            if (e.target === canvasWrapper || e.target === svgCanvas || e.target.tagName === 'image') {
+                isPanning = true;
+                panStartX = e.clientX;
+                panStartY = e.clientY;
+                scrollStartX = canvasWrapper.scrollLeft;
+                scrollStartY = canvasWrapper.scrollTop;
+                canvasWrapper.classList.add('dragging');
+            }
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (isPanning) {
+                const dx = e.clientX - panStartX;
+                const dy = e.clientY - panStartY;
+                canvasWrapper.scrollLeft = scrollStartX - dx;
+                canvasWrapper.scrollTop = scrollStartY - dy;
+            }
+        });
+
+        window.addEventListener('mouseup', () => {
+            isPanning = false;
+            canvasWrapper.classList.remove('dragging');
+        });
+
+        // Mouse wheel zoom
+        canvasWrapper.addEventListener('wheel', (e) => {
+            if (e.ctrlKey || e.metaKey) {
+                e.preventDefault();
+                if (e.deltaY < 0) {
+                    zoomIn();
+                } else {
+                    zoomOut();
+                }
+            }
+        });
+
+        function setupEventListeners() {
+            plateSelect.addEventListener('change', () => {
+                const idx = plateSelect.value;
+                if (idx !== '') {
+                    if (hasChanges && !confirm('You have unsaved changes. Continue?')) {
+                        return;
+                    }
+                    selectedIds.clear();
+                    loadPlate(parseInt(idx));
+                }
+            });
+
+            btnSelectAll.addEventListener('click', selectAll);
+            btnDeselect.addEventListener('click', deselectAll);
+            btnDelete.addEventListener('click', deleteSelected);
+            btnMerge.addEventListener('click', mergeSelected);
+            btnSave.addEventListener('click', saveChanges);
+
+            btnZoomIn.addEventListener('click', zoomIn);
+            btnZoomOut.addEventListener('click', zoomOut);
+            btnZoomFit.addEventListener('click', fitToView);
+
+            // Keyboard shortcuts
+            document.addEventListener('keydown', (e) => {
+                if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+                if (e.key === 'Delete' || e.key === 'Backspace') {
+                    e.preventDefault();
+                    deleteSelected();
+                } else if (e.key === 'm' || e.key === 'M') {
+                    e.preventDefault();
+                    mergeSelected();
+                } else if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+                    e.preventDefault();
+                    saveChanges();
+                } else if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+                    e.preventDefault();
+                    selectAll();
+                } else if (e.key === 'Escape') {
+                    deselectAll();
+                } else if (e.key === '=' || e.key === '+') {
+                    zoomIn();
+                } else if (e.key === '-') {
+                    zoomOut();
+                } else if (e.key === '0') {
+                    fitToView();
+                }
+            });
+
+            // Warn before unload with unsaved changes
+            window.addEventListener('beforeunload', (e) => {
+                if (hasChanges) {
+                    e.preventDefault();
+                    e.returnValue = '';
+                }
+            });
+        }
+
+        function showToast(message, type = 'info') {
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            toast.textContent = message;
+            document.body.appendChild(toast);
+
+            setTimeout(() => {
+                toast.remove();
+            }, 3000);
+        }
+
+        // Start
+        init();
+    </script>
+</body>
+</html>

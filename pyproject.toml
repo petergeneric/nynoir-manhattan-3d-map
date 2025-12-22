@@ -12,4 +12,6 @@ dependencies = [
     "supervision",
     "numpy",
     "Pillow",  # For JP2 fallback support
+    "flask",  # For editor web server
+    "shapely",  # For polygon merging
 ]
