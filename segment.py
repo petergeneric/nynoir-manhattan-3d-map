@@ -87,6 +87,13 @@ class Block:
             return f"{self.name}.svg"
         return f"b-{self.id}.svg"
 
+    @property
+    def image_filename(self) -> str:
+        """Return the image filename for this block."""
+        if self.name:
+            return f"{self.name}.png"
+        return f"b-{self.id}.png"
+
 
 @dataclass
 class PlateSegmentation:
@@ -1046,6 +1053,71 @@ def process_stage2(svg_path: Path, sam_model) -> None:
     print(f"Output files in: {output_dir}")
 
 
+def process_extract(svg_path: Path) -> Path:
+    """Extract block images from the source JP2 based on plate.svg.
+
+    Reads plate.svg metadata and block definitions, then extracts each
+    block region as a PNG image file.
+
+    Args:
+        svg_path: Path to plate.svg file
+
+    Returns:
+        Path to the output directory containing extracted images
+    """
+    print(f"Extract: Processing {svg_path}")
+
+    # Parse plate.svg to get metadata and blocks
+    print("Parsing plate.svg...")
+    metadata, blocks = parse_plate_svg(svg_path)
+    print(f"Found {len(blocks)} blocks in SVG")
+    print(f"Source JP2: {metadata.jp2_path}")
+
+    # Verify source JP2 exists
+    if not metadata.jp2_path.exists():
+        print(f"Error: Source JP2 not found: {metadata.jp2_path}")
+        raise FileNotFoundError(f"Source JP2 not found: {metadata.jp2_path}")
+
+    # Load source image
+    print("Loading source image...")
+    image_bgr = load_image(metadata.jp2_path)
+    print(f"Image size: {metadata.image_width}x{metadata.image_height}")
+
+    # Determine output directory (same as plate.svg location)
+    output_dir = svg_path.parent
+
+    # Renumber blocks sequentially (matching stage2 behavior)
+    renumbered_blocks = []
+    for idx, block in enumerate(blocks, 1):
+        new_id = f"{idx:04d}"
+        renumbered_blocks.append(Block(
+            id=new_id,
+            bbox=block.bbox,
+            contours=block.contours,
+            color=block.color,
+            name=block.name
+        ))
+
+    # Extract each block as an image
+    total_blocks = len(renumbered_blocks)
+    print(f"\nExtracting {total_blocks} block images...")
+
+    for idx, block in enumerate(renumbered_blocks, 1):
+        # Extract block region from original image
+        block_image_bgr = extract_region(image_bgr, block.bbox)
+
+        # Save as PNG
+        image_path = output_dir / block.image_filename
+        cv2.imwrite(str(image_path), block_image_bgr)
+
+        print(f"  [{idx}/{total_blocks}] {block.image_filename} ({block.bbox.width}x{block.bbox.height})")
+
+    print(f"\nExtract complete!")
+    print(f"Output: {output_dir}")
+
+    return output_dir
+
+
 def process_combine(svg_path: Path, apply_culling: bool = True) -> None:
     """Combine existing block SVGs into segmentation.svg without running SAM.
 
@@ -1306,6 +1378,13 @@ def main():
         help="Skip polygon culling (just combine existing SVGs as-is)"
     )
 
+    # Extract subcommand
+    extract_parser = subparsers.add_parser(
+        "extract",
+        help="Extract block images from source JP2 (no SAM)"
+    )
+    extract_parser.add_argument("svg", help="Path to plate.svg file")
+
     # Legacy mode (no subcommand) - runs both stages
     parser.add_argument("legacy_input", nargs="?", help="Input image (legacy mode: runs both stages)")
     parser.add_argument(
@@ -1389,6 +1468,15 @@ def main():
         process_combine(svg_path, apply_culling=not args.no_cull)
         return 0
 
+    elif args.command == "extract":
+        svg_path = Path(args.svg)
+        if not svg_path.exists():
+            print(f"Error: SVG file not found: {svg_path}")
+            return 1
+
+        process_extract(svg_path)
+        return 0
+
     # Legacy mode (no subcommand)
     if args.legacy_input is None:
         parser.print_help()
@@ -1396,6 +1484,7 @@ def main():
         print("  Stage 1: uv run python segment.py stage1 /path/to/image.jp2")
         print("  Stage 2: uv run python segment.py stage2 output/vol1/p37/plate.svg")
         print("  Combine: uv run python segment.py combine output/vol1/p37/plate.svg")
+        print("  Extract: uv run python segment.py extract output/vol1/p37/plate.svg")
         print("  Both:    uv run python segment.py /path/to/image.jp2")
         return 0
 
