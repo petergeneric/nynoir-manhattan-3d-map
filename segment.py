@@ -975,7 +975,7 @@ def main():
     )
 
     # Legacy mode (no subcommand) - runs both stages
-    parser.add_argument("input", nargs="?", help="Input image (legacy mode: runs both stages)")
+    parser.add_argument("legacy_input", nargs="?", help="Input image (legacy mode: runs both stages)")
     parser.add_argument(
         "-o", "--output-dir",
         default="output",
@@ -1049,7 +1049,7 @@ def main():
         return 0
 
     # Legacy mode (no subcommand)
-    if args.input is None:
+    if args.legacy_input is None:
         parser.print_help()
         print("\nExamples:")
         print("  Stage 1: uv run python segment.py stage1 /path/to/image.jp2")
@@ -1057,7 +1057,7 @@ def main():
         print("  Both:    uv run python segment.py /path/to/image.jp2")
         return 0
 
-    input_path = Path(args.input)
+    input_path = Path(args.legacy_input)
     if not input_path.exists():
         print(f"Error: Input image not found: {input_path}")
         return 1
