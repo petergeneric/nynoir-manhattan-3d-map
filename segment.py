@@ -1300,6 +1300,11 @@ def main():
         help="Regenerate segmentation.svg from existing block SVGs (no SAM)"
     )
     combine_parser.add_argument("svg", help="Path to plate.svg file")
+    combine_parser.add_argument(
+        "--no-cull",
+        action="store_true",
+        help="Skip polygon culling (just combine existing SVGs as-is)"
+    )
 
     # Legacy mode (no subcommand) - runs both stages
     parser.add_argument("legacy_input", nargs="?", help="Input image (legacy mode: runs both stages)")
@@ -1381,7 +1386,7 @@ def main():
             print(f"Error: SVG file not found: {svg_path}")
             return 1
 
-        process_combine(svg_path)
+        process_combine(svg_path, apply_culling=not args.no_cull)
         return 0
 
     # Legacy mode (no subcommand)
