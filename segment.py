@@ -8,9 +8,10 @@ Supports recursive segmentation for atlas plates:
 
 import argparse
 import urllib.request
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -22,6 +23,11 @@ from segment_anything import SamAutomaticMaskGenerator, sam_model_registry
 MODEL_TYPE = "vit_h"
 CHECKPOINT_URL = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth"
 CHECKPOINT_NAME = "sam_vit_h_4b8939.pth"
+
+# SVG Metadata Configuration
+ATLAS_NAMESPACE = "http://example.com/atlas"
+SVG_NAMESPACE = "http://www.w3.org/2000/svg"
+XLINK_NAMESPACE = "http://www.w3.org/1999/xlink"
 
 # Segmentation Configuration
 FIRST_PASS_CONFIG = {
@@ -89,6 +95,115 @@ class BlockSegmentation:
     local_width: int
     local_height: int
     contours: List[Tuple[np.ndarray, Tuple[int, int, int]]]  # (contour, color)
+
+
+@dataclass
+class PlateMetadata:
+    """Metadata extracted from plate.svg for Stage 2 processing."""
+    jp2_path: Path
+    volume: str
+    plate_id: str
+    image_width: int
+    image_height: int
+
+
+def bbox_from_polygon_points(points: List[Tuple[int, int]]) -> BoundingBox:
+    """Compute bounding box from polygon vertices."""
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    return BoundingBox(
+        x=min(xs),
+        y=min(ys),
+        width=max(xs) - min(xs),
+        height=max(ys) - min(ys)
+    )
+
+
+def parse_polygon_points(points_str: str) -> List[Tuple[int, int]]:
+    """Parse SVG polygon points string into list of (x, y) tuples."""
+    points = []
+    for pair in points_str.strip().split():
+        x, y = pair.split(',')
+        points.append((int(float(x)), int(float(y))))
+    return points
+
+
+def parse_plate_svg(svg_path: Path) -> Tuple[PlateMetadata, List[Block]]:
+    """Parse plate.svg to extract metadata and block definitions.
+
+    Returns:
+        Tuple of (PlateMetadata, List[Block])
+    """
+    tree = ET.parse(svg_path)
+    root = tree.getroot()
+
+    # Define namespaces for parsing
+    ns = {
+        "svg": SVG_NAMESPACE,
+        "atlas": ATLAS_NAMESPACE,
+    }
+
+    # Extract metadata from atlas:source element
+    source_elem = root.find(".//atlas:source", ns)
+    if source_elem is None:
+        raise ValueError(f"No atlas:source metadata found in {svg_path}")
+
+    jp2_path_elem = source_elem.find("atlas:jp2-path", ns)
+    volume_elem = source_elem.find("atlas:volume", ns)
+    plate_id_elem = source_elem.find("atlas:plate-id", ns)
+    width_elem = source_elem.find("atlas:image-width", ns)
+    height_elem = source_elem.find("atlas:image-height", ns)
+
+    if any(e is None for e in [jp2_path_elem, volume_elem, plate_id_elem, width_elem, height_elem]):
+        raise ValueError(f"Incomplete metadata in {svg_path}")
+
+    metadata = PlateMetadata(
+        jp2_path=Path(jp2_path_elem.text),
+        volume=volume_elem.text,
+        plate_id=plate_id_elem.text,
+        image_width=int(width_elem.text),
+        image_height=int(height_elem.text),
+    )
+
+    # Extract blocks from polygons with data-block-id attribute
+    # Need to handle the default namespace for SVG elements
+    blocks = []
+    np.random.seed(42)  # Consistent colors
+
+    # Find all polygon elements (handle both namespaced and non-namespaced)
+    for polygon in root.iter():
+        if polygon.tag.endswith('polygon') and polygon.get('data-block-id'):
+            block_id = polygon.get('data-block-id')
+            points_str = polygon.get('points')
+            if not points_str:
+                continue
+
+            points = parse_polygon_points(points_str)
+            if len(points) < 3:
+                continue
+
+            bbox = bbox_from_polygon_points(points)
+
+            # Convert points back to contour format for consistency
+            contour = np.array(points, dtype=np.int32).reshape(-1, 1, 2)
+
+            color = (
+                np.random.randint(0, 255),
+                np.random.randint(0, 255),
+                np.random.randint(0, 255)
+            )
+
+            blocks.append(Block(
+                id=block_id,
+                bbox=bbox,
+                contours=[contour],
+                color=color
+            ))
+
+    # Sort by area (largest first) for consistent ordering
+    blocks.sort(key=lambda b: b.bbox.area, reverse=True)
+
+    return metadata, blocks
 
 
 def download_checkpoint(checkpoint_path: Path) -> None:
@@ -344,17 +459,55 @@ def segment_block(
 
 
 # SVG Generators
-def generate_plate_svg(plate: PlateSegmentation, output_path: Path) -> None:
-    """Generate plate-level SVG showing city block outlines with labels."""
+def generate_plate_svg(
+    plate: PlateSegmentation,
+    output_path: Path,
+    source_jp2_path: Optional[Path] = None
+) -> None:
+    """Generate plate-level SVG showing city block outlines with labels.
+
+    Args:
+        plate: Plate segmentation results
+        output_path: Where to save the SVG
+        source_jp2_path: Optional path to source JP2 (for Stage 1 metadata)
+    """
+    # Build SVG with namespaces for metadata
     svg_parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'<svg xmlns="{SVG_NAMESPACE}" '
+        f'xmlns:xlink="{XLINK_NAMESPACE}" '
         f'width="{plate.image_width}" height="{plate.image_height}" '
         f'viewBox="0 0 {plate.image_width} {plate.image_height}">',
         '  <!-- Plate-level city block segmentation -->',
+    ]
+
+    # Add metadata if source JP2 path provided (Stage 1 output)
+    if source_jp2_path is not None:
+        abs_jp2_path = source_jp2_path.resolve()
+        svg_parts.extend([
+            '  <metadata>',
+            f'    <atlas:source xmlns:atlas="{ATLAS_NAMESPACE}">',
+            f'      <atlas:jp2-path>{abs_jp2_path}</atlas:jp2-path>',
+            f'      <atlas:volume>{plate.volume}</atlas:volume>',
+            f'      <atlas:plate-id>{plate.plate_id}</atlas:plate-id>',
+            f'      <atlas:image-width>{plate.image_width}</atlas:image-width>',
+            f'      <atlas:image-height>{plate.image_height}</atlas:image-height>',
+            '    </atlas:source>',
+            '  </metadata>',
+            '',
+            '  <!-- Background: source JP2 for ground truth reference -->',
+            f'  <image id="background" href="file://{abs_jp2_path}" '
+            f'width="{plate.image_width}" height="{plate.image_height}" opacity="0.5"/>',
+            '',
+        ])
+
+    svg_parts.extend([
         '  <style>',
         '    .block-label { font-family: sans-serif; font-size: 14px; font-weight: bold; }',
         '  </style>',
-    ]
+        '',
+        '  <!-- Block polygons (editable) -->',
+        '  <g id="blocks">',
+    ])
 
     for block in plate.blocks:
         r, g, b = block.color
@@ -371,7 +524,7 @@ def generate_plate_svg(plate: PlateSegmentation, output_path: Path) -> None:
 
             points_str = " ".join(f"{p[0]},{p[1]}" for p in points)
             svg_parts.append(
-                f'  <polygon points="{points_str}" '
+                f'    <polygon points="{points_str}" '
                 f'fill="{fill_color}" stroke="{stroke_color}" stroke-width="2" '
                 f'data-block-id="{block.id}"/>'
             )
@@ -380,12 +533,13 @@ def generate_plate_svg(plate: PlateSegmentation, output_path: Path) -> None:
         label_x = block.bbox.x + block.bbox.width // 2
         label_y = block.bbox.y + block.bbox.height // 2
         svg_parts.append(
-            f'  <text x="{label_x}" y="{label_y}" '
+            f'    <text x="{label_x}" y="{label_y}" '
             f'text-anchor="middle" dominant-baseline="middle" '
             f'class="block-label" fill="{stroke_color}" stroke="white" stroke-width="3" paint-order="stroke">'
             f'{filename}</text>'
         )
 
+    svg_parts.append('  </g>')
     svg_parts.append('</svg>')
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -521,7 +675,151 @@ def get_output_structure(
     return volume, plate_id, output_dir
 
 
-# Main Recursive Workflow
+# Stage 1: Block Detection
+def process_stage1(
+    input_path: Path,
+    output_base: Path,
+    sam_model,
+    min_block_width: int = 150,
+    min_block_height: int = 150,
+    max_area_ratio: float = 0.7
+) -> None:
+    """Stage 1: Detect blocks and output plate.svg with metadata.
+
+    This generates a plate.svg file that can be manually edited before
+    running Stage 2 to process individual blocks.
+    """
+    # Determine output structure
+    volume, plate_id, output_dir = get_output_structure(input_path, output_base)
+
+    print(f"Stage 1: Processing plate {volume}/{plate_id}")
+    print(f"Output directory: {output_dir}")
+
+    # Load full plate image
+    print("Loading plate image...")
+    image_bgr = load_image(input_path)
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    height, width = image_bgr.shape[:2]
+    print(f"Image size: {width}x{height}")
+
+    # First pass: Identify city blocks
+    print("Detecting city blocks...")
+    first_pass_generator = create_mask_generator(sam_model, FIRST_PASS_CONFIG)
+    blocks = segment_plate(
+        image_rgb,
+        first_pass_generator,
+        min_block_width,
+        min_block_height,
+        max_area_ratio
+    )
+    print(f"Found {len(blocks)} city blocks (filtered by min {min_block_width}x{min_block_height}px, max {max_area_ratio*100:.0f}% area)")
+
+    # Create plate segmentation result
+    plate = PlateSegmentation(
+        volume=volume,
+        plate_id=plate_id,
+        image_width=width,
+        image_height=height,
+        blocks=blocks
+    )
+
+    # Generate plate-level SVG with metadata
+    plate_svg_path = output_dir / "plate.svg"
+    generate_plate_svg(plate, plate_svg_path, source_jp2_path=input_path)
+
+    print(f"\nStage 1 complete!")
+    print(f"Output: {plate_svg_path}")
+    print(f"\nNext steps:")
+    print(f"  1. Open {plate_svg_path} in an SVG editor")
+    print(f"  2. Delete or merge blocks as needed")
+    print(f"  3. Run: uv run python segment.py stage2 {plate_svg_path}")
+
+
+# Stage 2: Block Segmentation
+def process_stage2(svg_path: Path, sam_model) -> None:
+    """Stage 2: Read plate.svg, extract blocks, run SAM on each.
+
+    Reads metadata from the plate.svg to find the source JP2, then
+    processes each block polygon through SAM for detailed segmentation.
+    """
+    print(f"Stage 2: Processing {svg_path}")
+
+    # Parse plate.svg to get metadata and blocks
+    print("Parsing plate.svg...")
+    metadata, blocks = parse_plate_svg(svg_path)
+    print(f"Found {len(blocks)} blocks in SVG")
+    print(f"Source JP2: {metadata.jp2_path}")
+    print(f"Volume: {metadata.volume}, Plate: {metadata.plate_id}")
+
+    # Verify source JP2 exists
+    if not metadata.jp2_path.exists():
+        print(f"Error: Source JP2 not found: {metadata.jp2_path}")
+        return
+
+    # Load source image
+    print("Loading source image...")
+    image_bgr = load_image(metadata.jp2_path)
+    print(f"Image size: {metadata.image_width}x{metadata.image_height}")
+
+    # Determine output directory (same as plate.svg location)
+    output_dir = svg_path.parent
+
+    # Renumber blocks sequentially
+    renumbered_blocks = []
+    for idx, block in enumerate(blocks, 1):
+        new_id = f"{idx:04d}"
+        renumbered_blocks.append(Block(
+            id=new_id,
+            bbox=block.bbox,
+            contours=block.contours,
+            color=block.color
+        ))
+
+    # Update plate with renumbered blocks for combined SVG
+    plate = PlateSegmentation(
+        volume=metadata.volume,
+        plate_id=metadata.plate_id,
+        image_width=metadata.image_width,
+        image_height=metadata.image_height,
+        blocks=renumbered_blocks
+    )
+
+    # Process each block
+    total_blocks = len(renumbered_blocks)
+    print(f"Processing {total_blocks} blocks...")
+    second_pass_generator = create_mask_generator(sam_model, SECOND_PASS_CONFIG)
+
+    for idx, block in enumerate(renumbered_blocks, 1):
+        print(f"  [{idx}/{total_blocks}] Processing block {block.id} ({block.bbox.width}x{block.bbox.height})...")
+
+        # Extract block region from original image
+        block_image_bgr = extract_region(image_bgr, block.bbox)
+        block_image_rgb = cv2.cvtColor(block_image_bgr, cv2.COLOR_BGR2RGB)
+
+        # Segment this block
+        block_seg = segment_block(
+            block_image_rgb,
+            second_pass_generator,
+            block.id,
+            block.bbox
+        )
+
+        # Generate block SVG
+        block_svg_path = output_dir / f"b-{block.id}.svg"
+        generate_block_svg(block_seg, block_svg_path)
+
+        print(f"    Found {len(block_seg.contours)} segments in block {block.id}")
+
+    # Generate combined SVG
+    print("Generating combined segmentation.svg...")
+    segmentation_svg_path = output_dir / "segmentation.svg"
+    generate_combined_svg(plate, segmentation_svg_path)
+
+    print(f"\nStage 2 complete!")
+    print(f"Output files in: {output_dir}")
+
+
+# Main Recursive Workflow (Legacy)
 def process_plate_recursive(
     input_path: Path,
     output_base: Path,
@@ -603,27 +901,97 @@ def process_plate_recursive(
     print(f"Complete! Output files in: {output_dir}")
 
 
+def load_sam_model(force_mps: bool = False):
+    """Load SAM model and return it along with checkpoint path."""
+    script_dir = Path(__file__).parent
+    checkpoint_path = script_dir / CHECKPOINT_NAME
+
+    # Download checkpoint if needed
+    download_checkpoint(checkpoint_path)
+
+    # Detect device
+    device = get_device(force_mps=force_mps)
+    print(f"Using device: {device}")
+
+    # Load SAM model
+    print("Loading SAM model...")
+    sam = sam_model_registry[MODEL_TYPE](checkpoint=str(checkpoint_path))
+    sam.to(device=device)
+
+    return sam
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Segment images using SAM. Default mode is recursive segmentation for atlas plates."
+        description="Segment images using SAM. Supports stage1/stage2 workflow for manual editing."
     )
-    parser.add_argument("input", nargs="?", default="example.png", help="Input image path")
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # Stage 1 subcommand
+    stage1_parser = subparsers.add_parser(
+        "stage1",
+        help="Detect blocks from plate image (run this first)"
+    )
+    stage1_parser.add_argument("input", help="Input JP2/image path")
+    stage1_parser.add_argument(
+        "-o", "--output-dir",
+        default="output",
+        help="Base output directory (default: output)"
+    )
+    stage1_parser.add_argument(
+        "--min-block-width",
+        type=int,
+        default=150,
+        help="Minimum block width in pixels (default: 150)"
+    )
+    stage1_parser.add_argument(
+        "--min-block-height",
+        type=int,
+        default=150,
+        help="Minimum block height in pixels (default: 150)"
+    )
+    stage1_parser.add_argument(
+        "--max-area-ratio",
+        type=float,
+        default=0.7,
+        help="Maximum block area as ratio of image (default: 0.7 = 70%%)"
+    )
+    stage1_parser.add_argument(
+        "--mps",
+        action="store_true",
+        help="Force use of MPS (Apple Silicon GPU)"
+    )
+
+    # Stage 2 subcommand
+    stage2_parser = subparsers.add_parser(
+        "stage2",
+        help="Process blocks from edited plate.svg"
+    )
+    stage2_parser.add_argument("svg", help="Path to plate.svg file")
+    stage2_parser.add_argument(
+        "--mps",
+        action="store_true",
+        help="Force use of MPS (Apple Silicon GPU)"
+    )
+
+    # Legacy mode (no subcommand) - runs both stages
+    parser.add_argument("input", nargs="?", help="Input image (legacy mode: runs both stages)")
     parser.add_argument(
         "-o", "--output-dir",
         default="output",
-        help="Base output directory for recursive mode (default: output)"
+        help="Base output directory (default: output)"
     )
     parser.add_argument(
         "--min-block-width",
         type=int,
         default=150,
-        help="Minimum block width in pixels for first-pass detection (default: 150)"
+        help="Minimum block width in pixels (default: 150)"
     )
     parser.add_argument(
         "--min-block-height",
         type=int,
         default=150,
-        help="Minimum block height in pixels for first-pass detection (default: 150)"
+        help="Minimum block height in pixels (default: 150)"
     )
     parser.add_argument(
         "--max-area-ratio",
@@ -636,46 +1004,68 @@ def main():
         action="store_true",
         help="Run original single-pass segmentation (outputs PNG + SVG)"
     )
-    # Legacy arguments for single-pass mode
     parser.add_argument(
         "--output-png",
-        help="[Single-pass only] Output PNG path (default: <input>_segmented.png)"
+        help="[Single-pass only] Output PNG path"
     )
     parser.add_argument(
         "-s", "--svg",
-        help="[Single-pass only] Output SVG path (default: <input>_segmented.svg)"
+        help="[Single-pass only] Output SVG path"
     )
     parser.add_argument(
         "--mps",
         action="store_true",
-        help="Force use of MPS (Apple Silicon GPU) instead of CPU"
+        help="Force use of MPS (Apple Silicon GPU)"
     )
+
     args = parser.parse_args()
 
-    script_dir = Path(__file__).parent
-    checkpoint_path = script_dir / CHECKPOINT_NAME
-    input_path = Path(args.input)
+    # Handle subcommands
+    if args.command == "stage1":
+        input_path = Path(args.input)
+        if not input_path.exists():
+            print(f"Error: Input image not found: {input_path}")
+            return 1
 
-    # Check input image exists
+        sam = load_sam_model(force_mps=args.mps)
+        process_stage1(
+            input_path,
+            Path(args.output_dir),
+            sam,
+            args.min_block_width,
+            args.min_block_height,
+            args.max_area_ratio
+        )
+        return 0
+
+    elif args.command == "stage2":
+        svg_path = Path(args.svg)
+        if not svg_path.exists():
+            print(f"Error: SVG file not found: {svg_path}")
+            return 1
+
+        sam = load_sam_model(force_mps=args.mps)
+        process_stage2(svg_path, sam)
+        return 0
+
+    # Legacy mode (no subcommand)
+    if args.input is None:
+        parser.print_help()
+        print("\nExamples:")
+        print("  Stage 1: uv run python segment.py stage1 /path/to/image.jp2")
+        print("  Stage 2: uv run python segment.py stage2 output/vol1/p37/plate.svg")
+        print("  Both:    uv run python segment.py /path/to/image.jp2")
+        return 0
+
+    input_path = Path(args.input)
     if not input_path.exists():
         print(f"Error: Input image not found: {input_path}")
         return 1
 
-    # Download checkpoint if needed
-    download_checkpoint(checkpoint_path)
-
-    # Detect device
-    device = get_device(force_mps=args.mps)
-    print(f"Using device: {device}")
-
-    # Load SAM model
-    print("Loading SAM model...")
-    sam = sam_model_registry[MODEL_TYPE](checkpoint=str(checkpoint_path))
-    sam.to(device=device)
+    sam = load_sam_model(force_mps=args.mps)
 
     if args.single_pass:
         # Original single-pass mode for comparison
-        # Generate output paths
         if args.output_png:
             output_path = Path(args.output_png)
         else:
@@ -686,12 +1076,10 @@ def main():
         else:
             svg_path = input_path.parent / f"{input_path.stem}_segmented.svg"
 
-        # Load image
         print(f"Loading image: {input_path}")
         image_bgr = load_image(input_path)
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
 
-        # Create mask generator with tuned parameters
         print("Generating masks...")
         mask_generator = SamAutomaticMaskGenerator(
             model=sam,
@@ -703,32 +1091,27 @@ def main():
             min_mask_region_area=100,
         )
 
-        # Generate masks
         sam_result = mask_generator.generate(image_rgb)
         print(f"Found {len(sam_result)} segments")
 
-        # Convert to supervision detections and annotate with 50% opacity
         detections = sv.Detections.from_sam(sam_result=sam_result)
         mask_annotator = sv.MaskAnnotator(
             color_lookup=sv.ColorLookup.INDEX,
-            opacity=0.5,  # 50% translucency
+            opacity=0.5,
         )
 
-        # Annotate image
         annotated_image = mask_annotator.annotate(
             scene=image_bgr.copy(),
             detections=detections,
         )
 
-        # Save PNG output
         cv2.imwrite(str(output_path), annotated_image)
         print(f"Saved segmented image: {output_path}")
 
-        # Save SVG output
         height, width = image_bgr.shape[:2]
         generate_svg(sam_result, width, height, svg_path)
     else:
-        # Recursive segmentation (default mode)
+        # Recursive segmentation (both stages)
         output_base = Path(args.output_dir)
         process_plate_recursive(
             input_path,
