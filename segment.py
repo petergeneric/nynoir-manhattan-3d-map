@@ -174,8 +174,8 @@ def parse_plate_svg(svg_path: Path) -> Tuple[PlateMetadata, List[Block]]:
 
     jp2_path = Path(jp2_path_str)
     if not jp2_path.is_absolute():
-        # Resolve relative path from the SVG file's directory
-        jp2_path = (svg_path.parent / jp2_path).resolve()
+        # Resolve relative path from working directory
+        jp2_path = Path.cwd() / jp2_path
 
     metadata = PlateMetadata(
         jp2_path=jp2_path,
