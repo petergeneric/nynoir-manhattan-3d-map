@@ -167,8 +167,18 @@ def parse_plate_svg(svg_path: Path) -> Tuple[PlateMetadata, List[Block]]:
     if any(e is None for e in [jp2_path_elem, volume_elem, plate_id_elem, width_elem, height_elem]):
         raise ValueError(f"Incomplete metadata in {svg_path}")
 
+    # Handle JP2 path - strip file:// prefix and resolve relative paths
+    jp2_path_str = jp2_path_elem.text
+    if jp2_path_str.startswith("file://"):
+        jp2_path_str = jp2_path_str[7:]  # Strip "file://"
+
+    jp2_path = Path(jp2_path_str)
+    if not jp2_path.is_absolute():
+        # Resolve relative path from the SVG file's directory
+        jp2_path = (svg_path.parent / jp2_path).resolve()
+
     metadata = PlateMetadata(
-        jp2_path=Path(jp2_path_elem.text),
+        jp2_path=jp2_path,
         volume=volume_elem.text,
         plate_id=plate_id_elem.text,
         image_width=int(width_elem.text),
