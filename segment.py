@@ -1185,15 +1185,69 @@ def process_extract(svg_path: Path) -> Path:
     print(f"\nExtracting {total_blocks} block images...")
 
     for idx, block in enumerate(renumbered_blocks, 1):
-        # Extract block region with 10% expansion and bounds handling
-        block_image_rgba = extract_region_with_bounds(image_bgr, block.bbox, expansion_factor=0.1)
+        # Convert contours to Shapely polygon for buffering
+        # Use the first (main) contour
+        if not block.contours:
+            print(f"  [{idx}/{total_blocks}] {block.image_filename} - SKIPPED (no contours)")
+            continue
+
+        contour = block.contours[0]
+        points = [(int(pt[0][0]), int(pt[0][1])) for pt in contour]
+        if len(points) < 3:
+            print(f"  [{idx}/{total_blocks}] {block.image_filename} - SKIPPED (insufficient points)")
+            continue
+
+        original_poly = ShapelyPolygon(points)
+        if not original_poly.is_valid:
+            original_poly = make_valid(original_poly)
+
+        # Calculate buffer distance based on average bbox dimension
+        avg_dimension = (block.bbox.width + block.bbox.height) / 2
+        buffer_10pct = avg_dimension * 0.10
+        buffer_5pct = avg_dimension * 0.05
+
+        # Expand polygon by 10% for canvas bounds
+        canvas_poly = original_poly.buffer(buffer_10pct)
+        # Expand polygon by 5% for mask (visible region)
+        mask_poly = original_poly.buffer(buffer_5pct)
+
+        # Get bounding box of 10% expanded polygon for extraction
+        minx, miny, maxx, maxy = canvas_poly.bounds
+        canvas_bbox = BoundingBox(
+            x=int(minx),
+            y=int(miny),
+            width=int(maxx - minx),
+            height=int(maxy - miny)
+        )
+
+        # Extract region based on canvas bounds
+        block_image_rgba = extract_region_with_bounds(image_bgr, canvas_bbox, expansion_factor=0.0)
+
+        # Create mask from 5% expanded polygon
+        mask = np.zeros((canvas_bbox.height, canvas_bbox.width), dtype=np.uint8)
+
+        # Convert mask polygon to local coordinates and draw
+        if mask_poly.geom_type == 'Polygon':
+            mask_coords = np.array(mask_poly.exterior.coords, dtype=np.int32)
+            # Translate to local coordinates
+            mask_coords[:, 0] -= canvas_bbox.x
+            mask_coords[:, 1] -= canvas_bbox.y
+            cv2.fillPoly(mask, [mask_coords], 255)
+        elif mask_poly.geom_type == 'MultiPolygon':
+            for poly in mask_poly.geoms:
+                mask_coords = np.array(poly.exterior.coords, dtype=np.int32)
+                mask_coords[:, 0] -= canvas_bbox.x
+                mask_coords[:, 1] -= canvas_bbox.y
+                cv2.fillPoly(mask, [mask_coords], 255)
+
+        # Apply mask to alpha channel (0 = transparent, 255 = opaque)
+        block_image_rgba[:, :, 3] = mask
 
         # Save as PNG (with alpha channel for transparency)
         image_path = output_dir / block.image_filename
         cv2.imwrite(str(image_path), block_image_rgba)
 
-        expanded = block.bbox.expand(0.1)
-        print(f"  [{idx}/{total_blocks}] {block.image_filename} ({expanded.width}x{expanded.height})")
+        print(f"  [{idx}/{total_blocks}] {block.image_filename} ({canvas_bbox.width}x{canvas_bbox.height})")
 
     print(f"\nExtract complete!")
     print(f"Output: {output_dir}")
