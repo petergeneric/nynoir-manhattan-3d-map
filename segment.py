@@ -18,6 +18,8 @@ import numpy as np
 import supervision as sv
 import torch
 from segment_anything import SamAutomaticMaskGenerator, sam_model_registry
+from shapely.geometry import Polygon as ShapelyPolygon
+from shapely.validation import make_valid
 
 # Model Configuration
 MODEL_TYPE = "vit_h"
@@ -468,6 +470,72 @@ def segment_block(
     )
 
 
+def filter_contours_outside_block(
+    block_seg: BlockSegmentation,
+    block_contour: np.ndarray,
+    block_bbox: BoundingBox
+) -> BlockSegmentation:
+    """Filter out contours that lie entirely outside the block polygon.
+
+    Args:
+        block_seg: The segmentation result with contours in local coordinates
+        block_contour: The block polygon contour in plate coordinates
+        block_bbox: The bounding box used to extract the block region
+
+    Returns:
+        A new BlockSegmentation with only contours that intersect the block polygon
+    """
+    # Convert block contour from plate coordinates to local coordinates
+    block_points = block_contour.squeeze()
+    if len(block_points.shape) == 1:
+        # Single point, can't form a polygon
+        return block_seg
+
+    local_block_points = [(p[0] - block_bbox.x, p[1] - block_bbox.y) for p in block_points]
+
+    # Create Shapely polygon for the block boundary
+    if len(local_block_points) < 3:
+        return block_seg
+
+    try:
+        block_polygon = ShapelyPolygon(local_block_points)
+        if not block_polygon.is_valid:
+            block_polygon = make_valid(block_polygon)
+    except Exception:
+        # If we can't create a valid polygon, return unfiltered
+        return block_seg
+
+    # Filter contours
+    filtered_contours = []
+    for contour, color in block_seg.contours:
+        if len(contour) < 3:
+            continue
+
+        points = contour.squeeze()
+        if len(points.shape) == 1:
+            continue
+
+        try:
+            seg_polygon = ShapelyPolygon([(p[0], p[1]) for p in points])
+            if not seg_polygon.is_valid:
+                seg_polygon = make_valid(seg_polygon)
+
+            # Keep contour if it intersects the block polygon
+            if block_polygon.intersects(seg_polygon):
+                filtered_contours.append((contour, color))
+        except Exception:
+            # If we can't process this contour, skip it
+            continue
+
+    return BlockSegmentation(
+        block_id=block_seg.block_id,
+        parent_bbox=block_seg.parent_bbox,
+        local_width=block_seg.local_width,
+        local_height=block_seg.local_height,
+        contours=filtered_contours
+    )
+
+
 # SVG Generators
 def generate_plate_svg(
     plate: PlateSegmentation,
@@ -813,11 +881,18 @@ def process_stage2(svg_path: Path, sam_model) -> None:
             block.bbox
         )
 
+        # Filter out segments that lie entirely outside the block polygon
+        # (SAM segments the full bounding box, but we only want segments within the actual polygon)
+        raw_count = len(block_seg.contours)
+        if block.contours:
+            block_seg = filter_contours_outside_block(block_seg, block.contours[0], block.bbox)
+        filtered_count = len(block_seg.contours)
+
         # Generate block SVG (use data-name if available, otherwise b-{id})
         block_svg_path = output_dir / block.svg_filename
         generate_block_svg(block_seg, block_svg_path)
 
-        print(f"    Found {len(block_seg.contours)} segments in block {block.id} -> {block.svg_filename}")
+        print(f"    Found {filtered_count} segments in block {block.id} -> {block.svg_filename} (filtered {raw_count - filtered_count} outside polygon)")
 
     # Generate combined SVG
     print("Generating combined segmentation.svg...")
