@@ -2,6 +2,9 @@
 *.png
 *.jp2
 .DS_Store
-*.svg
 *.pth
+
+# Block SVGs
+b-0*.svg
+
 
