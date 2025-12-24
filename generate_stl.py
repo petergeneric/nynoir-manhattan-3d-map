@@ -24,6 +24,7 @@ from stl import mesh
 STORY_HEIGHT = 10  # Each story is 10 units tall
 
 # Area thresholds for height rules
+MIN_SKIP_AREA = 400         # Skip polygons smaller than this
 MIN_AREA_THRESHOLD = 2200   # Small polygons - bias toward lower heights
 EDGE_SMALL_AREA = 3000      # Edge objects smaller than this = 1 story
 MAX_AREA_THRESHOLD = 200000 # Skip polygons larger than this
@@ -614,11 +615,12 @@ def get_height_for_shape(shape: Shape, seg_data: Optional[SegmentationData] = No
     """Determine extrusion height for a shape based on elevation rules.
 
     Rules applied:
-    1. Skip polygons with area > 200,000
-    2. Edge objects with area < 3000 get 1 story
-    3. Edge objects with area >= 3000 get at least 2 stories
-    4. Small polygons (area < 2200) bias toward lower heights
-    5. Heights above 5 stories are less likely
+    1. Skip polygons with area < 400
+    2. Skip polygons with area > 200,000
+    3. Edge objects with area < 3000 get 1 story
+    4. Edge objects with area >= 3000 get at least 2 stories
+    5. Small polygons (area < 2200) bias toward lower heights
+    6. Heights above 5 stories are less likely
 
     Args:
         shape: The shape to get height for
@@ -633,7 +635,11 @@ def get_height_for_shape(shape: Shape, seg_data: Optional[SegmentationData] = No
 
     area = shape.area
 
-    # Rule 1: Skip large polygons
+    # Rule 1: Skip small polygons
+    if area < MIN_SKIP_AREA:
+        return None
+
+    # Rule 2: Skip large polygons
     if area > MAX_AREA_THRESHOLD:
         return None
 
@@ -739,7 +745,7 @@ def process_segmentation(seg_dir: Path, output_path: Path, use_plate_coords: boo
 
     print(f"Successfully processed {successful_buildings} buildings")
     if skipped_buildings > 0:
-        print(f"Skipped {skipped_buildings} shapes (area > {MAX_AREA_THRESHOLD})")
+        print(f"Skipped {skipped_buildings} shapes (area < {MIN_SKIP_AREA} or > {MAX_AREA_THRESHOLD})")
     print(f"Total triangles: {len(all_triangles)}")
 
     stl_mesh = create_stl_mesh(all_triangles)
@@ -861,7 +867,7 @@ Examples:
 
         print(f"Successfully processed {successful} shapes from block")
         if skipped > 0:
-            print(f"Skipped {skipped} shapes (area > {MAX_AREA_THRESHOLD})")
+            print(f"Skipped {skipped} shapes (area < {MIN_SKIP_AREA} or > {MAX_AREA_THRESHOLD})")
         print(f"Total triangles: {len(all_triangles)}")
 
         stl_mesh = create_stl_mesh(all_triangles)
