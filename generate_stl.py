@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
 """
 Generate an STL file by extruding building shapes from an SVG.
+
+Supports two input formats:
+1. Legacy SVG with <path> elements (original mode)
+2. Segmentation files from ../segment-anything with <polygon> elements
+
 Heights are randomized between 2-5 stories, weighted towards 2.
+Block context is tracked for each shape to enable context-aware height generation.
 """
 
 import re
 import random
+import argparse
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import List, Dict, Optional, Tuple
 
 import numpy as np
 from stl import mesh
@@ -14,10 +23,192 @@ from stl import mesh
 # Story height in the same units as the SVG (pixels)
 STORY_HEIGHT = 10  # Each story is 10 units tall
 
-def parse_svg_paths(svg_content):
-    """Extract all path 'd' attributes from the SVG."""
+
+@dataclass
+class BlockContext:
+    """Context information about a city block from segmentation."""
+    block_id: str
+    plate_x: int  # Block's X offset in plate coordinates
+    plate_y: int  # Block's Y offset in plate coordinates
+    width: int
+    height: int
+    source_file: Path
+
+    def __repr__(self):
+        return f"BlockContext(id={self.block_id}, offset=({self.plate_x},{self.plate_y}), size={self.width}x{self.height})"
+
+
+@dataclass
+class Shape:
+    """A 2D shape with its block context."""
+    points: List[Tuple[float, float]]
+    block: Optional[BlockContext] = None
+    local_bounds: Optional[Tuple[float, float, float, float]] = None  # min_x, min_y, max_x, max_y
+
+    def __post_init__(self):
+        if self.points and self.local_bounds is None:
+            xs = [p[0] for p in self.points]
+            ys = [p[1] for p in self.points]
+            self.local_bounds = (min(xs), min(ys), max(xs), max(ys))
+
+    @property
+    def area(self) -> float:
+        """Calculate polygon area using shoelace formula."""
+        n = len(self.points)
+        if n < 3:
+            return 0
+        area = 0
+        for i in range(n):
+            j = (i + 1) % n
+            area += self.points[i][0] * self.points[j][1]
+            area -= self.points[j][0] * self.points[i][1]
+        return abs(area) / 2
+
+    def to_plate_coords(self) -> List[Tuple[float, float]]:
+        """Convert local coordinates to plate coordinates."""
+        if self.block is None:
+            return self.points
+        return [(p[0] + self.block.plate_x, p[1] + self.block.plate_y) for p in self.points]
+
+
+@dataclass
+class SegmentationData:
+    """Container for all shapes loaded from segmentation files."""
+    blocks: Dict[str, BlockContext] = field(default_factory=dict)
+    shapes: List[Shape] = field(default_factory=list)
+    source_dir: Optional[Path] = None
+
+    def shapes_in_block(self, block_id: str) -> List[Shape]:
+        """Get all shapes belonging to a specific block."""
+        return [s for s in self.shapes if s.block and s.block.block_id == block_id]
+
+    def get_block_for_shape(self, shape: Shape) -> Optional[BlockContext]:
+        """Get the block context for a shape."""
+        return shape.block
+
+def parse_svg_paths(svg_content: str) -> List[str]:
+    """Extract all path 'd' attributes from the SVG (legacy format)."""
     path_pattern = r'<path\s+d="([^"]+)"'
     return re.findall(path_pattern, svg_content)
+
+
+def parse_svg_polygon_points(points_str: str) -> List[Tuple[float, float]]:
+    """Parse SVG polygon points string into list of (x, y) tuples."""
+    points = []
+    for pair in points_str.strip().split():
+        if ',' in pair:
+            x, y = pair.split(',')
+            points.append((float(x), float(y)))
+    return points
+
+
+def parse_block_svg(svg_path: Path) -> Tuple[Optional[BlockContext], List[Shape]]:
+    """Parse a block SVG file from segment-anything output.
+
+    Returns:
+        Tuple of (BlockContext, list of Shapes with that context)
+    """
+    with open(svg_path, 'r') as f:
+        content = f.read()
+
+    # Extract block metadata from SVG attributes
+    # Format: <svg ... data-block-id="0001" data-plate-x="123" data-plate-y="456">
+    svg_match = re.search(
+        r'<svg[^>]*'
+        r'width="(\d+)"[^>]*'
+        r'height="(\d+)"[^>]*'
+        r'data-block-id="([^"]+)"[^>]*'
+        r'data-plate-x="(\d+)"[^>]*'
+        r'data-plate-y="(\d+)"',
+        content, re.DOTALL
+    )
+
+    # Try alternate attribute order
+    if not svg_match:
+        svg_match = re.search(
+            r'<svg[^>]*'
+            r'data-block-id="([^"]+)"[^>]*'
+            r'data-plate-x="(\d+)"[^>]*'
+            r'data-plate-y="(\d+)"[^>]*'
+            r'width="(\d+)"[^>]*'
+            r'height="(\d+)"',
+            content, re.DOTALL
+        )
+        if svg_match:
+            block_id, plate_x, plate_y, width, height = svg_match.groups()
+        else:
+            # Try to get just width/height for non-block SVGs
+            dim_match = re.search(r'<svg[^>]*width="(\d+)"[^>]*height="(\d+)"', content)
+            if dim_match:
+                width, height = dim_match.groups()
+                block_id, plate_x, plate_y = None, 0, 0
+            else:
+                return None, []
+    else:
+        width, height, block_id, plate_x, plate_y = svg_match.groups()
+
+    block = None
+    if block_id:
+        block = BlockContext(
+            block_id=block_id,
+            plate_x=int(plate_x),
+            plate_y=int(plate_y),
+            width=int(width),
+            height=int(height),
+            source_file=svg_path
+        )
+
+    # Extract all polygon elements
+    polygon_pattern = r'<polygon\s+points="([^"]+)"'
+    shapes = []
+
+    for points_str in re.findall(polygon_pattern, content):
+        points = parse_svg_polygon_points(points_str)
+        if len(points) >= 3:
+            shapes.append(Shape(points=points, block=block))
+
+    return block, shapes
+
+
+def load_segmentation_directory(seg_dir: Path) -> SegmentationData:
+    """Load all block SVG files from a segmentation output directory.
+
+    Expected structure (from segment-anything):
+        seg_dir/
+            plate.svg       (optional, plate-level overview)
+            b-0001.svg      (block detail files)
+            b-0002.svg
+            ...
+            or
+            {name}.svg      (named block files)
+
+    Args:
+        seg_dir: Path to segmentation output directory (e.g., output/vol1/p1/)
+
+    Returns:
+        SegmentationData with all blocks and shapes loaded
+    """
+    data = SegmentationData(source_dir=seg_dir)
+
+    # Find all block SVG files (b-XXXX.svg or custom named)
+    svg_files = list(seg_dir.glob("b-*.svg"))
+
+    # Also include any other SVGs that aren't plate.svg or segmentation.svg
+    for svg_file in seg_dir.glob("*.svg"):
+        if svg_file.name not in ("plate.svg", "segmentation.svg"):
+            if svg_file not in svg_files:
+                svg_files.append(svg_file)
+
+    print(f"Found {len(svg_files)} block SVG files in {seg_dir}")
+
+    for svg_file in sorted(svg_files):
+        block, shapes = parse_block_svg(svg_file)
+        if block:
+            data.blocks[block.block_id] = block
+        data.shapes.extend(shapes)
+
+    print(f"Loaded {len(data.shapes)} shapes from {len(data.blocks)} blocks")
+    return data
 
 def parse_path_to_polygon(d_attr):
     """
@@ -266,13 +457,33 @@ def create_stl_mesh(triangles):
 
     return stl_mesh
 
-def main():
-    # Read SVG file
-    svg_path = Path(__file__).parent / 'src' / 'nyn block test.svg'
+def get_height_for_shape(shape: Shape, seg_data: Optional[SegmentationData] = None) -> float:
+    """Determine extrusion height for a shape.
+
+    This function can be extended to use block context for smarter height assignment.
+    For now, uses weighted random stories.
+
+    Args:
+        shape: The shape to get height for
+        seg_data: Optional segmentation data for context-aware height generation
+
+    Returns:
+        Height in SVG units
+    """
+    # TODO: Use block context for smarter height generation
+    # For example:
+    # - Shapes near block edges could be taller
+    # - Shapes in certain blocks could have different height distributions
+    # - Larger shapes could be taller buildings
+    stories = get_weighted_random_stories()
+    return stories * STORY_HEIGHT
+
+
+def process_legacy_svg(svg_path: Path, output_path: Path) -> None:
+    """Process legacy SVG with <path> elements."""
     with open(svg_path, 'r') as f:
         svg_content = f.read()
 
-    # Parse all paths
     path_data = parse_svg_paths(svg_content)
     print(f"Found {len(path_data)} paths in SVG")
 
@@ -282,8 +493,8 @@ def main():
     for i, d in enumerate(path_data):
         points = parse_path_to_polygon(d)
         if points and len(points) >= 3:
-            stories = get_weighted_random_stories()
-            height = stories * STORY_HEIGHT
+            shape = Shape(points=points)
+            height = get_height_for_shape(shape)
 
             try:
                 triangles = extrude_polygon_to_mesh(points, height)
@@ -295,11 +506,174 @@ def main():
     print(f"Successfully processed {successful_buildings} buildings")
     print(f"Total triangles: {len(all_triangles)}")
 
-    # Write STL
-    output_path = Path(__file__).parent / 'nyc_block.stl'
     stl_mesh = create_stl_mesh(all_triangles)
     stl_mesh.save(str(output_path))
     print(f"Wrote STL file to: {output_path}")
 
+
+def process_segmentation(seg_dir: Path, output_path: Path, use_plate_coords: bool = True) -> None:
+    """Process segmentation files from segment-anything.
+
+    Args:
+        seg_dir: Directory containing block SVG files (e.g., output/vol1/p1/)
+        output_path: Path for output STL file
+        use_plate_coords: If True, place shapes in plate coordinates; if False, use local block coords
+    """
+    seg_data = load_segmentation_directory(seg_dir)
+
+    if not seg_data.shapes:
+        print("No shapes found in segmentation directory")
+        return
+
+    all_triangles = []
+    successful_buildings = 0
+
+    for i, shape in enumerate(seg_data.shapes):
+        # Get coordinates (plate or local)
+        if use_plate_coords:
+            points = shape.to_plate_coords()
+        else:
+            points = shape.points
+
+        if len(points) < 3:
+            continue
+
+        height = get_height_for_shape(shape, seg_data)
+
+        try:
+            triangles = extrude_polygon_to_mesh(points, height)
+            all_triangles.extend(triangles)
+            successful_buildings += 1
+        except Exception as e:
+            block_info = f" (block {shape.block.block_id})" if shape.block else ""
+            print(f"Warning: Failed to process shape {i}{block_info}: {e}")
+
+    print(f"Successfully processed {successful_buildings} buildings")
+    print(f"Total triangles: {len(all_triangles)}")
+
+    stl_mesh = create_stl_mesh(all_triangles)
+    stl_mesh.save(str(output_path))
+    print(f"Wrote STL file to: {output_path}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate STL files by extruding 2D shapes from SVG.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Legacy mode (SVG with <path> elements)
+  uv run python generate_stl.py --svg src/block.svg
+
+  # Segmentation mode (from segment-anything output)
+  uv run python generate_stl.py --segmentation ../segment-anything/output/vol1/p1/
+
+  # Process single block SVG
+  uv run python generate_stl.py --block ../segment-anything/output/vol1/p1/b-0001.svg
+        """
+    )
+
+    input_group = parser.add_mutually_exclusive_group()
+    input_group.add_argument(
+        "--svg",
+        type=Path,
+        help="Path to legacy SVG file with <path> elements"
+    )
+    input_group.add_argument(
+        "--segmentation", "--seg",
+        type=Path,
+        dest="segmentation",
+        help="Path to segmentation directory (e.g., output/vol1/p1/)"
+    )
+    input_group.add_argument(
+        "--block",
+        type=Path,
+        help="Path to single block SVG file"
+    )
+
+    parser.add_argument(
+        "-o", "--output",
+        type=Path,
+        help="Output STL file path (default: auto-generated based on input)"
+    )
+    parser.add_argument(
+        "--local-coords",
+        action="store_true",
+        help="Use local block coordinates instead of plate coordinates"
+    )
+
+    args = parser.parse_args()
+
+    # Determine input mode and output path
+    if args.segmentation:
+        seg_dir = args.segmentation
+        if not seg_dir.is_dir():
+            print(f"Error: Not a directory: {seg_dir}")
+            return 1
+        output_path = args.output or (seg_dir / "extruded.stl")
+        process_segmentation(seg_dir, output_path, use_plate_coords=not args.local_coords)
+
+    elif args.block:
+        block_path = args.block
+        if not block_path.exists():
+            print(f"Error: File not found: {block_path}")
+            return 1
+        output_path = args.output or block_path.with_suffix(".stl")
+
+        # Create a temporary segmentation data with just this block
+        block, shapes = parse_block_svg(block_path)
+        if not shapes:
+            print(f"No shapes found in {block_path}")
+            return 1
+
+        seg_data = SegmentationData(source_dir=block_path.parent)
+        if block:
+            seg_data.blocks[block.block_id] = block
+        seg_data.shapes = shapes
+
+        all_triangles = []
+        successful = 0
+        for i, shape in enumerate(shapes):
+            points = shape.points if args.local_coords else shape.to_plate_coords()
+            if len(points) < 3:
+                continue
+            height = get_height_for_shape(shape, seg_data)
+            try:
+                triangles = extrude_polygon_to_mesh(points, height)
+                all_triangles.extend(triangles)
+                successful += 1
+            except Exception as e:
+                print(f"Warning: Failed to process shape {i}: {e}")
+
+        print(f"Successfully processed {successful} shapes from block")
+        print(f"Total triangles: {len(all_triangles)}")
+
+        stl_mesh = create_stl_mesh(all_triangles)
+        stl_mesh.save(str(output_path))
+        print(f"Wrote STL file to: {output_path}")
+
+    elif args.svg:
+        svg_path = args.svg
+        if not svg_path.exists():
+            print(f"Error: File not found: {svg_path}")
+            return 1
+        output_path = args.output or svg_path.with_suffix(".stl")
+        process_legacy_svg(svg_path, output_path)
+
+    else:
+        # Default: use legacy mode with default input file
+        svg_path = Path(__file__).parent / 'src' / 'nyn block test.svg'
+        output_path = args.output or (Path(__file__).parent / 'nyc_block.stl')
+
+        if not svg_path.exists():
+            parser.print_help()
+            print(f"\nNote: Default input file not found: {svg_path}")
+            return 1
+
+        process_legacy_svg(svg_path, output_path)
+
+    return 0
+
+
 if __name__ == '__main__':
-    main()
+    exit(main())
