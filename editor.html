@@ -474,6 +474,43 @@
         .toolbar button.toggle.active:hover:not(:disabled) {
             background: #6ab0e7;
         }
+
+        .area-filter {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-right: 10px;
+        }
+
+        .area-filter label {
+            color: #888;
+            font-size: 12px;
+            white-space: nowrap;
+        }
+
+        .area-filter input {
+            background: #0f3460;
+            color: #fff;
+            border: 1px solid #1a1a2e;
+            padding: 6px 8px;
+            border-radius: 4px;
+            font-size: 13px;
+            width: 70px;
+            text-align: right;
+        }
+
+        .area-filter input:focus {
+            outline: none;
+            border-color: #4a8aca;
+        }
+
+        .toolbar button.isolate {
+            background: #8b6914;
+        }
+
+        .toolbar button.isolate:hover:not(:disabled) {
+            background: #a57d1a;
+        }
     </style>
 </head>
 <body>
@@ -490,6 +527,12 @@
             <span id="selection-count"></span>
         </div>
         <div class="toolbar">
+            <div class="area-filter">
+                <label>Area ≤</label>
+                <input type="number" id="area-threshold" value="100" min="0" step="10">
+            </div>
+            <button id="btn-isolate" class="isolate" disabled title="Isolate small polygons (I)">Isolate</button>
+            <button id="btn-delete-visible" class="danger" disabled title="Delete all visible (X)">Del Visible</button>
             <button id="btn-select-all" disabled>Select All</button>
             <button id="btn-deselect" disabled>Deselect</button>
             <button id="btn-hide" disabled>Hide Selected</button>
@@ -545,6 +588,8 @@
                 <kbd>M</kbd> Merge &nbsp;
                 <kbd>H</kbd> Hide &nbsp;
                 <kbd>S</kbd> Show all &nbsp;
+                <kbd>I</kbd> Isolate small &nbsp;
+                <kbd>X</kbd> Del visible &nbsp;
                 <kbd>L</kbd> Labels &nbsp;
                 <kbd>Ctrl+S</kbd> Save
             </div>
@@ -587,6 +632,9 @@
         const btnZoomFit = document.getElementById('btn-zoom-fit');
         const btnUndelete = document.getElementById('btn-undelete');
         const deletedList = document.getElementById('deleted-list');
+        const areaThreshold = document.getElementById('area-threshold');
+        const btnIsolate = document.getElementById('btn-isolate');
+        const btnDeleteVisible = document.getElementById('btn-delete-visible');
 
         // Initialize
         async function init() {
@@ -902,6 +950,30 @@
             };
         }
 
+        function calculatePolygonArea(pointsStr) {
+            // Shoelace formula for polygon area
+            const points = [];
+            for (const pair of pointsStr.trim().split(/\s+/)) {
+                if (pair.includes(',')) {
+                    const [x, y] = pair.split(',').map(Number);
+                    if (!isNaN(x) && !isNaN(y)) {
+                        points.push({ x, y });
+                    }
+                }
+            }
+
+            if (points.length < 3) return 0;
+
+            let area = 0;
+            const n = points.length;
+            for (let i = 0; i < n; i++) {
+                const j = (i + 1) % n;
+                area += points[i].x * points[j].y;
+                area -= points[j].x * points[i].y;
+            }
+            return Math.abs(area) / 2;
+        }
+
         function renderBlockList() {
             blockList.innerHTML = '';
 
@@ -1124,6 +1196,9 @@
             // Both modes now use unified structure
             const itemCount = polygons.length;
 
+            // Count visible polygons
+            const visibleCount = polygons.filter((_, idx) => !hiddenIds.has(idx)).length;
+
             btnSelectAll.disabled = !hasPlate || itemCount === 0;
             btnDeselect.disabled = !hasSelection;
             btnHide.disabled = !hasSelection;
@@ -1134,6 +1209,8 @@
             btnMerge.disabled = !canMerge || currentSvgType === 'segmentation';
             btnSave.disabled = !hasChanges;
             btnUndelete.disabled = !canUndo;
+            btnIsolate.disabled = !hasPlate || itemCount === 0;
+            btnDeleteVisible.disabled = !hasPlate || visibleCount === 0;
         }
 
         function selectAll() {
@@ -1167,6 +1244,95 @@
             updateSelection();
 
             showToast(`Showing ${count} block(s)`, 'success');
+        }
+
+        function isolateSmall() {
+            const threshold = parseFloat(areaThreshold.value) || 100;
+
+            let hiddenCount = 0;
+            let visibleCount = 0;
+
+            polygons.forEach((poly, idx) => {
+                const area = calculatePolygonArea(poly.points);
+                if (area > threshold) {
+                    hiddenIds.add(idx);
+                    hiddenCount++;
+                } else {
+                    hiddenIds.delete(idx);
+                    visibleCount++;
+                }
+            });
+
+            selectedIds.clear();
+            updateSelection();
+
+            showToast(`Isolated ${visibleCount} polygons with area ≤ ${threshold} (hid ${hiddenCount})`, 'success');
+        }
+
+        function deleteVisible() {
+            // Get all visible (non-hidden) polygon indices
+            const visibleIndices = [];
+            polygons.forEach((_, idx) => {
+                if (!hiddenIds.has(idx)) {
+                    visibleIndices.push(idx);
+                }
+            });
+
+            if (visibleIndices.length === 0) {
+                showToast('No visible polygons to delete', 'error');
+                return;
+            }
+
+            const count = visibleIndices.length;
+
+            // Add visible polygons to deleted list
+            const deletedBatch = [];
+            visibleIndices.forEach(idx => {
+                const poly = polygons[idx];
+                deletedBatch.push({
+                    ...poly,
+                    originalIndex: idx
+                });
+            });
+
+            deletedPolygons.push(...deletedBatch);
+            deleteHistory.push({
+                count: deletedBatch.length,
+                startIndex: deletedPolygons.length - deletedBatch.length,
+                type: currentSvgType
+            });
+
+            // Create set for fast lookup
+            const visibleSet = new Set(visibleIndices);
+
+            // Rebuild hidden indices (only hidden ones remain, indices shift down)
+            const newHiddenIds = new Set();
+            let offset = 0;
+            polygons.forEach((_, idx) => {
+                if (visibleSet.has(idx)) {
+                    offset++;
+                } else if (hiddenIds.has(idx)) {
+                    newHiddenIds.add(idx - offset);
+                }
+            });
+
+            polygons = polygons.filter((_, idx) => !visibleSet.has(idx));
+            hiddenIds = newHiddenIds;
+            selectedIds.clear();
+            hasChanges = true;
+
+            renderSVG({
+                width: svgCanvas.getAttribute('width'),
+                height: svgCanvas.getAttribute('height')
+            });
+            renderBlockList();
+            renderDeletedList();
+            updateTabCounts();
+            updateStatus();
+            updateButtons();
+
+            const itemLabel = currentSvgType === 'segmentation' ? 'polygon(s)' : 'block(s)';
+            showToast(`Deleted ${count} visible ${itemLabel}`, 'success');
         }
 
         function toggleLabels() {
@@ -1529,6 +1695,8 @@
             btnMerge.addEventListener('click', mergeSelected);
             btnSave.addEventListener('click', saveChanges);
             btnUndelete.addEventListener('click', undoDelete);
+            btnIsolate.addEventListener('click', isolateSmall);
+            btnDeleteVisible.addEventListener('click', deleteVisible);
 
             btnZoomIn.addEventListener('click', zoomIn);
             btnZoomOut.addEventListener('click', zoomOut);
@@ -1563,6 +1731,12 @@
                 } else if (e.key === 'l' || e.key === 'L') {
                     e.preventDefault();
                     toggleLabels();
+                } else if (e.key === 'i' || e.key === 'I') {
+                    e.preventDefault();
+                    isolateSmall();
+                } else if (e.key === 'x' || e.key === 'X') {
+                    e.preventDefault();
+                    deleteVisible();
                 } else if ((e.ctrlKey || e.metaKey) && e.key === 's') {
                     e.preventDefault();
                     saveChanges();

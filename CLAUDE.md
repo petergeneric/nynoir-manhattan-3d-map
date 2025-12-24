@@ -96,11 +96,15 @@ Keyboard shortcuts:
 - `U`: Undo last delete
 - `H`: Hide selected
 - `S`: Show all
+- `I`: Isolate small polygons (hide all with area > threshold)
+- `X`: Delete all visible polygons
 - `L`: Toggle labels
 - `Ctrl+S`: Save changes
 - `Ctrl+A`: Select all
 - `Escape`: Deselect all
 - `+` / `-` / `0`: Zoom in / out / fit
+
+The area threshold input (default 100) filters polygons by SVG area for the Isolate command.
 
 Alternatively, open `plate.svg` in an SVG editor (Inkscape, Illustrator, etc.) and:
 - Delete incorrect block detections
