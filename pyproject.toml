@@ -5,6 +5,7 @@ description = "Generate STL files by extruding SVG building shapes"
 requires-python = ">=3.10"
 dependencies = [
     "numpy-stl",
+    "shapely>=2.1.2",
 ]
 
 [project.scripts]

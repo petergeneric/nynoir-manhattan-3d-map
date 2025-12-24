@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
 import numpy as np
+from shapely.geometry import Polygon as ShapelyPolygon
 from stl import mesh
 
 # Story height in the same units as the SVG (pixels)
@@ -31,6 +32,9 @@ MAX_AREA_THRESHOLD = 200000 # Skip polygons larger than this
 
 # Edge detection tolerance
 EDGE_OVERLAP_TOLERANCE = 5  # Pixels of overlap allowed when checking for blocking shapes
+
+# Polygon simplification
+DEFAULT_SIMPLIFY_TOLERANCE = 2.0  # Max deviation in pixels for polygon simplification
 
 
 @dataclass
@@ -201,8 +205,14 @@ def parse_svg_polygon_points(points_str: str) -> List[Tuple[float, float]]:
     return points
 
 
-def parse_block_svg(svg_path: Path) -> Tuple[Optional[BlockContext], List[Shape]]:
+def parse_block_svg(svg_path: Path,
+                    simplify_tolerance: float = DEFAULT_SIMPLIFY_TOLERANCE
+                    ) -> Tuple[Optional[BlockContext], List[Shape]]:
     """Parse a block SVG file from segment-anything output.
+
+    Args:
+        svg_path: Path to the block SVG file
+        simplify_tolerance: Tolerance for polygon simplification (0 to disable)
 
     Returns:
         Tuple of (BlockContext, list of Shapes with that context)
@@ -264,12 +274,16 @@ def parse_block_svg(svg_path: Path) -> Tuple[Optional[BlockContext], List[Shape]
     for points_str in re.findall(polygon_pattern, content):
         points = parse_svg_polygon_points(points_str)
         if len(points) >= 3:
+            if simplify_tolerance > 0:
+                points = simplify_polygon(points, simplify_tolerance)
             shapes.append(Shape(points=points, block=block))
 
     return block, shapes
 
 
-def load_segmentation_directory(seg_dir: Path) -> SegmentationData:
+def load_segmentation_directory(seg_dir: Path,
+                                simplify_tolerance: float = DEFAULT_SIMPLIFY_TOLERANCE
+                                ) -> SegmentationData:
     """Load all block SVG files from a segmentation output directory.
 
     Expected structure (from segment-anything):
@@ -283,6 +297,7 @@ def load_segmentation_directory(seg_dir: Path) -> SegmentationData:
 
     Args:
         seg_dir: Path to segmentation output directory (e.g., output/vol1/p1/)
+        simplify_tolerance: Tolerance for polygon simplification (0 to disable)
 
     Returns:
         SegmentationData with all blocks and shapes loaded
@@ -301,7 +316,7 @@ def load_segmentation_directory(seg_dir: Path) -> SegmentationData:
     print(f"Found {len(svg_files)} block SVG files in {seg_dir}")
 
     for svg_file in sorted(svg_files):
-        block, shapes = parse_block_svg(svg_file)
+        block, shapes = parse_block_svg(svg_file, simplify_tolerance)
         if block:
             data.blocks[block.block_id] = block
         data.shapes.extend(shapes)
@@ -397,6 +412,43 @@ def parse_path_to_polygon(d_attr):
         points = points[:-1]
 
     return points if len(points) >= 3 else None
+
+
+def simplify_polygon(points: List[Tuple[float, float]],
+                     tolerance: float = 2.0) -> List[Tuple[float, float]]:
+    """Simplify a polygon using the Ramer-Douglas-Peucker algorithm.
+
+    Args:
+        points: List of (x, y) tuples forming the polygon
+        tolerance: Maximum distance a point can deviate from the simplified line.
+                   Higher values = more aggressive simplification.
+
+    Returns:
+        Simplified list of (x, y) tuples. Returns original points if
+        simplification fails or produces fewer than 3 points.
+    """
+    if len(points) < 3 or tolerance <= 0:
+        return points
+
+    try:
+        poly = ShapelyPolygon(points)
+        if not poly.is_valid:
+            # Try to fix invalid polygons
+            poly = poly.buffer(0)
+
+        simplified = poly.simplify(tolerance, preserve_topology=True)
+
+        # Extract coordinates (excluding the closing point which duplicates the first)
+        coords = list(simplified.exterior.coords)[:-1]
+
+        if len(coords) >= 3:
+            return [(float(x), float(y)) for x, y in coords]
+        else:
+            return points
+    except Exception:
+        # If simplification fails, return original
+        return points
+
 
 def get_weighted_random_stories():
     """
@@ -666,7 +718,8 @@ def get_height_for_shape(shape: Shape, seg_data: Optional[SegmentationData] = No
     return stories * config.story_height
 
 
-def process_legacy_svg(svg_path: Path, output_path: Path) -> None:
+def process_legacy_svg(svg_path: Path, output_path: Path,
+                       simplify_tolerance: float = DEFAULT_SIMPLIFY_TOLERANCE) -> None:
     """Process legacy SVG with <path> elements."""
     with open(svg_path, 'r') as f:
         svg_content = f.read()
@@ -680,6 +733,8 @@ def process_legacy_svg(svg_path: Path, output_path: Path) -> None:
     for i, d in enumerate(path_data):
         points = parse_path_to_polygon(d)
         if points and len(points) >= 3:
+            if simplify_tolerance > 0:
+                points = simplify_polygon(points, simplify_tolerance)
             shape = Shape(points=points)
             height = get_height_for_shape(shape)
 
@@ -699,7 +754,8 @@ def process_legacy_svg(svg_path: Path, output_path: Path) -> None:
 
 
 def process_segmentation(seg_dir: Path, output_path: Path, use_plate_coords: bool = True,
-                         config: Optional[HeightConfig] = None) -> None:
+                         config: Optional[HeightConfig] = None,
+                         simplify_tolerance: float = DEFAULT_SIMPLIFY_TOLERANCE) -> None:
     """Process segmentation files from segment-anything.
 
     Args:
@@ -707,8 +763,9 @@ def process_segmentation(seg_dir: Path, output_path: Path, use_plate_coords: boo
         output_path: Path for output STL file
         use_plate_coords: If True, place shapes in plate coordinates; if False, use local block coords
         config: Optional height configuration (min/max stories)
+        simplify_tolerance: Tolerance for polygon simplification (0 to disable)
     """
-    seg_data = load_segmentation_directory(seg_dir)
+    seg_data = load_segmentation_directory(seg_dir, simplify_tolerance)
 
     if not seg_data.shapes:
         print("No shapes found in segmentation directory")
@@ -810,6 +867,13 @@ Examples:
         default=7.0,
         help="Maximum building height in stories (default: 7.0)"
     )
+    parser.add_argument(
+        "--simplify",
+        type=float,
+        default=DEFAULT_SIMPLIFY_TOLERANCE,
+        metavar="TOLERANCE",
+        help=f"Polygon simplification tolerance in pixels (default: {DEFAULT_SIMPLIFY_TOLERANCE}, 0 to disable)"
+    )
 
     args = parser.parse_args()
 
@@ -827,7 +891,7 @@ Examples:
             return 1
         output_path = args.output or (seg_dir / "extruded.stl")
         process_segmentation(seg_dir, output_path, use_plate_coords=not args.local_coords,
-                           config=height_config)
+                           config=height_config, simplify_tolerance=args.simplify)
 
     elif args.block:
         block_path = args.block
@@ -837,7 +901,7 @@ Examples:
         output_path = args.output or block_path.with_suffix(".stl")
 
         # Create a temporary segmentation data with just this block
-        block, shapes = parse_block_svg(block_path)
+        block, shapes = parse_block_svg(block_path, args.simplify)
         if not shapes:
             print(f"No shapes found in {block_path}")
             return 1
@@ -880,7 +944,7 @@ Examples:
             print(f"Error: File not found: {svg_path}")
             return 1
         output_path = args.output or svg_path.with_suffix(".stl")
-        process_legacy_svg(svg_path, output_path)
+        process_legacy_svg(svg_path, output_path, args.simplify)
 
     else:
         # Default: use legacy mode with default input file
@@ -892,7 +956,7 @@ Examples:
             print(f"\nNote: Default input file not found: {svg_path}")
             return 1
 
-        process_legacy_svg(svg_path, output_path)
+        process_legacy_svg(svg_path, output_path, args.simplify)
 
     return 0
 
