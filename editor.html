@@ -1571,7 +1571,7 @@
                     document.querySelectorAll('.svg-polygon').forEach(poly => {
                         const idx = parseInt(poly.dataset.index);
                         if (!hiddenIds.has(idx)) {
-                            poly.style.opacity = isVisible ? '' : '0';
+                            poly.style.opacity = isVisible ? '' : '0.05';
                         }
                     });
                 }, 400);  // Flash every 400ms
