@@ -1618,19 +1618,44 @@
                 return;
             }
 
-            const selectedIndices = Array.from(selectedIds).sort((a, b) => a - b);
+            // Get block_ids of selected polygons
+            const selectedBlockIds = new Set();
+            selectedIds.forEach(idx => {
+                const blockId = polygons[idx].block_id;
+                if (blockId) selectedBlockIds.add(blockId);
+            });
+
+            // Separate polygons into: cutters, same-block targets, other-block (unchanged)
             const cutterPolygons = [];
             const targetPolygons = [];
-            const targetOriginalData = [];  // Keep metadata for non-selected polygons
+            const targetOriginalData = [];  // Metadata for same-block targets (indexed by position in targetPolygons)
+            const unchangedPolygons = [];   // Polygons in other blocks (kept as-is)
 
             polygons.forEach((poly, idx) => {
                 if (selectedIds.has(idx)) {
                     cutterPolygons.push(poly.points);
-                } else {
+                } else if (poly.block_id && selectedBlockIds.has(poly.block_id)) {
+                    // Same block as a selected polygon - will be processed
                     targetPolygons.push(poly.points);
                     targetOriginalData.push(poly);
+                } else {
+                    // Different block - keep unchanged
+                    unchangedPolygons.push(poly);
                 }
             });
+
+            if (targetPolygons.length === 0) {
+                // No same-block targets, just remove the selected polygons
+                polygons = unchangedPolygons;
+                selectedIds.clear();
+                hasChanges = true;
+                renderSVG(currentSvgData);
+                renderBlockList();
+                updateStatus();
+                updateButtons();
+                showToast(`Removed ${cutterPolygons.length} polygon(s)`, 'success');
+                return;
+            }
 
             try {
                 const response = await fetch('/api/cut', {
@@ -1645,35 +1670,30 @@
                 const result = await response.json();
 
                 if (result.success) {
-                    // Build new hidden indices
-                    const newHiddenIds = new Set();
-                    hiddenIds.forEach(hiddenIdx => {
-                        if (!selectedIds.has(hiddenIdx)) {
-                            const offset = selectedIndices.filter(d => d < hiddenIdx).length;
-                            newHiddenIds.add(hiddenIdx - offset);
-                        }
-                    });
+                    // Rebuild polygons from API results using original_index for correct metadata
+                    const newPolygons = [...unchangedPolygons];
 
-                    // Rebuild polygons array: use result polygons with original metadata where possible
-                    const newPolygons = [];
-                    result.result_polygons.forEach((points, i) => {
-                        const original = targetOriginalData[i] || targetOriginalData[0] || {};
-                        newPolygons.push({
-                            id: original.id || 'cut-result',
-                            points: points,
-                            fill: original.fill || 'rgba(100,100,200,0.3)',
-                            stroke: original.stroke || 'rgb(100,100,200)',
-                            name: original.name,
-                            block_id: original.block_id,
-                            poly_id: original.poly_id,
-                            plate_x: original.plate_x,
-                            plate_y: original.plate_y
+                    result.results.forEach(entry => {
+                        const original = targetOriginalData[entry.original_index];
+                        // Each entry.polygons array may have 0, 1, or multiple polygons
+                        entry.polygons.forEach(points => {
+                            newPolygons.push({
+                                id: original.id || 'cut-result',
+                                points: points,
+                                fill: original.fill || 'rgba(100,100,200,0.3)',
+                                stroke: original.stroke || 'rgb(100,100,200)',
+                                name: original.name,
+                                block_id: original.block_id,
+                                poly_id: original.poly_id,
+                                plate_x: original.plate_x,
+                                plate_y: original.plate_y
+                            });
                         });
                     });
 
                     polygons = newPolygons;
                     selectedIds.clear();
-                    hiddenIds = newHiddenIds;
+                    hiddenIds.clear();  // Reset hidden since indices changed
                     hasChanges = true;
 
                     renderSVG(currentSvgData);
@@ -1681,7 +1701,7 @@
                     updateStatus();
                     updateButtons();
 
-                    showToast(`Cut ${cutterPolygons.length} polygon(s) from overlapping areas`, 'success');
+                    showToast(`Cut ${cutterPolygons.length} polygon(s) from ${targetPolygons.length} same-block polygon(s)`, 'success');
                 } else {
                     showToast('Cut failed: ' + (result.error || 'Unknown error'), 'error');
                 }

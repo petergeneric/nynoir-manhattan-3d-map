@@ -115,10 +115,11 @@ def merge_polygons(polygon_points_list: list[list[tuple[float, float]]]) -> list
 
 
 def cut_polygons(cutter_points_list: list[list[tuple[float, float]]],
-                 target_points_list: list[list[tuple[float, float]]]) -> list[list[tuple[float, float]]]:
+                 target_points_list: list[list[tuple[float, float]]]) -> list[dict]:
     """
     Cut cutter polygons out of all target polygons using geometric difference.
-    Returns list of resulting polygon point lists (may have more polygons if cuts create splits).
+    Returns list of dicts with original_index and resulting polygon point lists.
+    Each input polygon maps to one result entry (which may have 0, 1, or multiple polygons).
     """
     # Build union of all cutter polygons
     cutter_polys = []
@@ -134,20 +135,26 @@ def cut_polygons(cutter_points_list: list[list[tuple[float, float]]],
                 continue
 
     if not cutter_polys:
-        return target_points_list  # No valid cutters, return unchanged
+        # No valid cutters, return all originals unchanged
+        return [{"original_index": i, "polygons": [pts]} for i, pts in enumerate(target_points_list)]
 
     cutter_union = unary_union(cutter_polys)
 
-    # Process each target polygon
-    result_polygons = []
-    for points in target_points_list:
+    # Process each target polygon, tracking original index
+    results = []
+    for i, points in enumerate(target_points_list):
+        result_entry = {"original_index": i, "polygons": []}
+
         if len(points) < 3:
+            results.append(result_entry)  # Empty result for invalid input
             continue
+
         try:
             target = Polygon(points)
             if not target.is_valid:
                 target = make_valid(target)
             if not target.is_valid or target.is_empty:
+                results.append(result_entry)  # Empty result for invalid polygon
                 continue
 
             # Compute difference
@@ -155,16 +162,16 @@ def cut_polygons(cutter_points_list: list[list[tuple[float, float]]],
                 diff = target.difference(cutter_union)
                 # Extract polygon(s) from result
                 if diff.is_empty:
-                    continue  # Polygon completely removed
+                    pass  # Polygon completely removed, leave polygons empty
                 elif isinstance(diff, Polygon):
                     coords = list(diff.exterior.coords)
                     if coords:
-                        result_polygons.append(coords[:-1])
+                        result_entry["polygons"].append(coords[:-1])
                 elif isinstance(diff, MultiPolygon):
                     for poly in diff.geoms:
                         coords = list(poly.exterior.coords)
                         if coords:
-                            result_polygons.append(coords[:-1])
+                            result_entry["polygons"].append(coords[:-1])
                 else:
                     # GeometryCollection - extract Polygons
                     if hasattr(diff, 'geoms'):
@@ -172,14 +179,16 @@ def cut_polygons(cutter_points_list: list[list[tuple[float, float]]],
                             if isinstance(geom, Polygon) and not geom.is_empty:
                                 coords = list(geom.exterior.coords)
                                 if coords:
-                                    result_polygons.append(coords[:-1])
+                                    result_entry["polygons"].append(coords[:-1])
             else:
                 # No intersection, keep original
-                result_polygons.append(points)
+                result_entry["polygons"].append(points)
         except Exception:
-            result_polygons.append(points)  # Keep original on error
+            result_entry["polygons"].append(points)  # Keep original on error
 
-    return result_polygons
+        results.append(result_entry)
+
+    return results
 
 
 def get_plates() -> list[dict]:
@@ -774,13 +783,19 @@ def api_cut():
     if not cutter_points:
         return jsonify({"error": "No valid cutter polygons"}), 400
 
-    result = cut_polygons(cutter_points, target_points)
-    result_strs = [points_to_svg_string(pts) for pts in result]
+    results = cut_polygons(cutter_points, target_points)
+
+    # Convert polygon points to SVG strings in each result entry
+    results_with_strs = []
+    for entry in results:
+        results_with_strs.append({
+            "original_index": entry["original_index"],
+            "polygons": [points_to_svg_string(pts) for pts in entry["polygons"]]
+        })
 
     return jsonify({
         "success": True,
-        "result_polygons": result_strs,
-        "removed_count": len(target_points) - len(result)
+        "results": results_with_strs
     })
 
 
