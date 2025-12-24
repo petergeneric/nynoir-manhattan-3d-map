@@ -1690,10 +1690,29 @@
         async function mergeSelected() {
             if (selectedIds.size < 2) return;
 
-            // Get selected polygon points
-            const selectedPolygons = [];
             const selectedIndices = Array.from(selectedIds).sort((a, b) => a - b);
 
+            // Check if all selected polygons belong to the same block
+            const blockIds = new Set();
+            selectedIndices.forEach(idx => {
+                const poly = polygons[idx];
+                if (poly.block_id) {
+                    blockIds.add(poly.block_id);
+                } else {
+                    blockIds.add(null);  // No block_id (plate mode or standalone)
+                }
+            });
+
+            // If polygons span multiple blocks (or no blocks), don't allow merge
+            if (blockIds.size > 1 || blockIds.has(null)) {
+                showToast('Cannot merge: selected items must belong to the same block', 'warning');
+                return;
+            }
+
+            const commonBlockId = Array.from(blockIds)[0];
+
+            // Get selected polygon points
+            const selectedPolygons = [];
             selectedIndices.forEach(idx => {
                 selectedPolygons.push(polygons[idx].points);
             });
@@ -1708,7 +1727,7 @@
                 const result = await response.json();
 
                 if (result.success && result.merged_polygons.length > 0) {
-                    // Get color from first selected polygon
+                    // Get properties from first selected polygon
                     const firstSelected = polygons[selectedIndices[0]];
 
                     // Build new hidden indices after merge
@@ -1724,13 +1743,17 @@
                     // Remove selected polygons
                     polygons = polygons.filter((_, idx) => !selectedIds.has(idx));
 
-                    // Add merged polygon(s)
+                    // Add merged polygon(s), preserving block membership
                     result.merged_polygons.forEach(points => {
                         polygons.push({
                             id: 'merged',
                             points: points,
                             fill: firstSelected.fill,
-                            stroke: firstSelected.stroke
+                            stroke: firstSelected.stroke,
+                            block_id: commonBlockId,
+                            plate_x: firstSelected.plate_x,
+                            plate_y: firstSelected.plate_y,
+                            is_container_child: firstSelected.is_container_child
                         });
                     });
 
@@ -1743,7 +1766,7 @@
                     updateStatus();
                     updateButtons();
 
-                    showToast(`Merged ${selectedIndices.length} blocks into ${result.merged_polygons.length}`, 'success');
+                    showToast(`Merged ${selectedIndices.length} polygons`, 'success');
                 } else {
                     showToast('Merge failed: ' + (result.error || 'Unknown error'), 'error');
                 }
