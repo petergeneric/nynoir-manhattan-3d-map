@@ -1745,34 +1745,43 @@
                 return;
             }
 
-            // Get block_ids of selected polygons
-            const selectedBlockIds = new Set();
+            // Group selected polygons (cutters) by block_id
+            const cuttersByBlock = {};  // block_id -> [points]
             selectedIds.forEach(idx => {
-                const blockId = polygons[idx].block_id;
-                if (blockId) selectedBlockIds.add(blockId);
+                const poly = polygons[idx];
+                const blockId = poly.block_id;
+                if (blockId) {
+                    if (!cuttersByBlock[blockId]) {
+                        cuttersByBlock[blockId] = [];
+                    }
+                    cuttersByBlock[blockId].push(poly.points);
+                }
             });
 
-            // Separate polygons into: cutters, same-block targets, other-block (unchanged)
-            const cutterPolygons = [];
-            const targetPolygons = [];
-            const targetOriginalData = [];  // Metadata for same-block targets (indexed by position in targetPolygons)
-            const unchangedPolygons = [];   // Polygons in other blocks (kept as-is)
-
+            // Group target polygons by block_id (non-selected polygons in same blocks as cutters)
+            const targetsByBlock = {};  // block_id -> [{poly, idx}]
             polygons.forEach((poly, idx) => {
-                if (selectedIds.has(idx)) {
-                    cutterPolygons.push(poly.points);
-                } else if (poly.block_id && selectedBlockIds.has(poly.block_id)) {
-                    // Same block as a selected polygon - will be processed
-                    targetPolygons.push(poly.points);
-                    targetOriginalData.push(poly);
-                } else {
-                    // Different block - keep unchanged
+                if (!selectedIds.has(idx) && poly.block_id && cuttersByBlock[poly.block_id]) {
+                    if (!targetsByBlock[poly.block_id]) {
+                        targetsByBlock[poly.block_id] = [];
+                    }
+                    targetsByBlock[poly.block_id].push({ poly, idx });
+                }
+            });
+
+            // Collect unchanged polygons (not selected, not in a block with selected cutters)
+            const unchangedPolygons = [];
+            polygons.forEach((poly, idx) => {
+                if (!selectedIds.has(idx) && (!poly.block_id || !cuttersByBlock[poly.block_id])) {
                     unchangedPolygons.push(poly);
                 }
             });
 
-            if (targetPolygons.length === 0) {
+            // Check if we have any targets to process
+            const blockIds = Object.keys(targetsByBlock);
+            if (blockIds.length === 0) {
                 // No same-block targets, just remove the selected polygons
+                const cutterCount = selectedIds.size;
                 polygons = unchangedPolygons;
                 selectedIds.clear();
                 hiddenIds.clear();
@@ -1782,59 +1791,70 @@
                 renderBlockList();
                 updateStatus();
                 updateButtons();
-                showToast(`Removed ${cutterPolygons.length} polygon(s)`, 'success');
+                showToast(`Removed ${cutterCount} polygon(s)`, 'success');
                 return;
             }
 
             try {
-                const response = await fetch('/api/cut', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        cutter_polygons: cutterPolygons,
-                        target_polygons: targetPolygons
-                    })
-                });
+                // Process each block separately to ensure cutters only affect their own block
+                const newPolygons = [...unchangedPolygons];
+                let totalCutters = 0;
+                let totalTargets = 0;
 
-                const result = await response.json();
+                for (const blockId of blockIds) {
+                    const cutters = cuttersByBlock[blockId];
+                    const targets = targetsByBlock[blockId];
+                    if (!cutters || !targets || targets.length === 0) continue;
 
-                if (result.success) {
-                    // Rebuild polygons from API results using original_index for correct metadata
-                    const newPolygons = [...unchangedPolygons];
+                    totalCutters += cutters.length;
+                    totalTargets += targets.length;
 
-                    result.results.forEach(entry => {
-                        const original = targetOriginalData[entry.original_index];
-                        // Each entry.polygons array may have 0, 1, or multiple polygons
-                        entry.polygons.forEach(points => {
-                            newPolygons.push({
-                                id: original.id || 'cut-result',
-                                points: points,
-                                fill: original.fill || 'rgba(100,100,200,0.3)',
-                                stroke: original.stroke || 'rgb(100,100,200)',
-                                name: original.name,
-                                block_id: original.block_id,
-                                poly_id: original.poly_id,
-                                plate_x: original.plate_x,
-                                plate_y: original.plate_y
-                            });
-                        });
+                    const response = await fetch('/api/cut', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            cutter_polygons: cutters,
+                            target_polygons: targets.map(t => t.poly.points)
+                        })
                     });
 
-                    polygons = newPolygons;
-                    selectedIds.clear();
-                    hiddenIds.clear();  // Reset hidden since indices changed
-                    reapplyIsolationMode();
-                    hasChanges = true;
+                    const result = await response.json();
 
-                    renderSVG(currentSvgData);
-                    renderBlockList();
-                    updateStatus();
-                    updateButtons();
-
-                    showToast(`Cut ${cutterPolygons.length} polygon(s) from ${targetPolygons.length} same-block polygon(s)`, 'success');
-                } else {
-                    showToast('Cut failed: ' + (result.error || 'Unknown error'), 'error');
+                    if (result.success) {
+                        result.results.forEach(entry => {
+                            const original = targets[entry.original_index].poly;
+                            // Each entry.polygons array may have 0, 1, or multiple polygons
+                            entry.polygons.forEach(points => {
+                                newPolygons.push({
+                                    id: original.id || 'cut-result',
+                                    points: points,
+                                    fill: original.fill || 'rgba(100,100,200,0.3)',
+                                    stroke: original.stroke || 'rgb(100,100,200)',
+                                    name: original.name,
+                                    block_id: original.block_id,
+                                    poly_id: original.poly_id,
+                                    plate_x: original.plate_x,
+                                    plate_y: original.plate_y
+                                });
+                            });
+                        });
+                    } else {
+                        throw new Error(result.error || 'Unknown error');
+                    }
                 }
+
+                polygons = newPolygons;
+                selectedIds.clear();
+                hiddenIds.clear();  // Reset hidden since indices changed
+                reapplyIsolationMode();
+                hasChanges = true;
+
+                renderSVG(currentSvgData);
+                renderBlockList();
+                updateStatus();
+                updateButtons();
+
+                showToast(`Cut ${totalCutters} polygon(s) from ${totalTargets} same-block polygon(s)`, 'success');
             } catch (error) {
                 showToast('Cut failed: ' + error.message, 'error');
             }
