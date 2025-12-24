@@ -640,6 +640,42 @@
         async function init() {
             await loadPlates();
             setupEventListeners();
+
+            // Check URL for plate selection
+            loadPlateFromURL();
+        }
+
+        function loadPlateFromURL() {
+            const params = new URLSearchParams(window.location.search);
+            const volume = params.get('volume');
+            const plateId = params.get('plate');
+            const svgType = params.get('type') || 'plate';
+
+            if (volume && plateId) {
+                // Find the matching plate in the list
+                const idx = plates.findIndex(p =>
+                    p.volume === volume &&
+                    p.plate_id === plateId &&
+                    p.svg_type === svgType
+                );
+
+                if (idx >= 0) {
+                    plateSelect.value = idx;
+                    loadPlate(idx);
+                }
+            }
+        }
+
+        function updateURL(plate) {
+            if (!plate) return;
+
+            const params = new URLSearchParams();
+            params.set('volume', plate.volume);
+            params.set('plate', plate.plate_id);
+            params.set('type', plate.svg_type || 'plate');
+
+            const newURL = `${window.location.pathname}?${params.toString()}`;
+            history.replaceState(null, '', newURL);
         }
 
         async function loadPlates() {
@@ -723,6 +759,9 @@
                 updateButtons();
 
                 loading.style.display = 'none';
+
+                // Update URL to reflect current plate
+                updateURL(plate);
 
                 // Fit to view
                 fitToView();
