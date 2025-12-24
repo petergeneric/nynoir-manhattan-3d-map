@@ -1456,15 +1456,51 @@
             canvasWrapper.classList.remove('dragging');
         });
 
-        // Mouse wheel zoom
+        // Mouse wheel zoom (smooth for trackpads, centered on cursor)
         canvasWrapper.addEventListener('wheel', (e) => {
             if (e.ctrlKey || e.metaKey) {
                 e.preventDefault();
-                if (e.deltaY < 0) {
-                    zoomIn();
-                } else {
-                    zoomOut();
-                }
+
+                // Normalize deltaY across browsers/devices
+                // Trackpads use smaller deltas, mice use larger ones
+                let delta = e.deltaY;
+
+                // If deltaMode is 1 (lines) or 2 (pages), convert to pixels
+                if (e.deltaMode === 1) delta *= 16;
+                if (e.deltaMode === 2) delta *= 100;
+
+                // Clamp delta to prevent extreme jumps
+                delta = Math.max(-100, Math.min(100, delta));
+
+                // Calculate zoom factor based on scroll amount
+                // Smaller factor = smoother zoom, especially for trackpads
+                const zoomFactor = 1 - delta * 0.003;
+
+                // Calculate new zoom with limits
+                const oldZoom = zoom;
+                const newZoom = Math.max(0.05, Math.min(4, zoom * zoomFactor));
+
+                if (newZoom === oldZoom) return;
+
+                // Get mouse position relative to the canvas wrapper
+                const rect = canvasWrapper.getBoundingClientRect();
+                const mouseX = e.clientX - rect.left;
+                const mouseY = e.clientY - rect.top;
+
+                // Calculate the point in SVG coordinates under the cursor (before zoom)
+                const svgX = (canvasWrapper.scrollLeft + mouseX) / oldZoom;
+                const svgY = (canvasWrapper.scrollTop + mouseY) / oldZoom;
+
+                // Apply new zoom
+                zoom = newZoom;
+                applyZoom();
+
+                // Calculate new scroll position to keep the same SVG point under cursor
+                const newScrollLeft = svgX * newZoom - mouseX;
+                const newScrollTop = svgY * newZoom - mouseY;
+
+                canvasWrapper.scrollLeft = newScrollLeft;
+                canvasWrapper.scrollTop = newScrollTop;
             }
         });
 
