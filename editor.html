@@ -475,6 +475,28 @@
             background: #6ab0e7;
         }
 
+        .background-selector {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-right: 10px;
+        }
+
+        .background-selector label {
+            color: #888;
+            font-size: 12px;
+            white-space: nowrap;
+        }
+
+        .background-selector select {
+            background: #0f3460;
+            color: #fff;
+            border: 1px solid #1a1a2e;
+            padding: 6px 8px;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+
         .area-filter {
             display: flex;
             align-items: center;
@@ -527,19 +549,20 @@
             <span id="selection-count"></span>
         </div>
         <div class="toolbar">
+            <div class="background-selector">
+                <label>Background:</label>
+                <select id="background-mode">
+                    <option value="image">Image</option>
+                    <option value="desaturated">Desaturated</option>
+                    <option value="gray">Gray</option>
+                    <option value="white">White</option>
+                </select>
+            </div>
             <div class="area-filter">
                 <label>Area ≤</label>
                 <input type="number" id="area-threshold" value="100" min="0" step="10">
             </div>
             <button id="btn-isolate" class="isolate" disabled title="Isolate small polygons (I)">Isolate</button>
-            <button id="btn-delete-visible" class="danger" disabled title="Delete all visible (X)">Del Visible</button>
-            <button id="btn-select-all" disabled>Select All</button>
-            <button id="btn-deselect" disabled>Deselect</button>
-            <button id="btn-hide" disabled>Hide Selected</button>
-            <button id="btn-show" disabled>Show All</button>
-            <button id="btn-overlay" class="toggle active" disabled>Labels</button>
-            <button id="btn-delete" class="danger" disabled>Delete Selected</button>
-            <button id="btn-merge" class="merge" disabled>Merge Selected</button>
             <button id="btn-save" class="primary" disabled>Save Changes</button>
         </div>
     </header>
@@ -611,6 +634,8 @@
         let hasChanges = false;
         let showLabels = true;
         let activeTab = 'blocks';
+        let backgroundMode = 'image';  // 'white', 'gray', 'image', 'desaturated'
+        let currentSvgData = null;  // Store current SVG data for re-renders
 
         // DOM elements
         const plateSelect = document.getElementById('plate-select');
@@ -619,13 +644,6 @@
         const canvasWrapper = document.getElementById('canvas-wrapper');
         const loading = document.getElementById('loading');
 
-        const btnSelectAll = document.getElementById('btn-select-all');
-        const btnDeselect = document.getElementById('btn-deselect');
-        const btnHide = document.getElementById('btn-hide');
-        const btnShow = document.getElementById('btn-show');
-        const btnOverlay = document.getElementById('btn-overlay');
-        const btnDelete = document.getElementById('btn-delete');
-        const btnMerge = document.getElementById('btn-merge');
         const btnSave = document.getElementById('btn-save');
         const btnZoomIn = document.getElementById('btn-zoom-in');
         const btnZoomOut = document.getElementById('btn-zoom-out');
@@ -634,7 +652,7 @@
         const deletedList = document.getElementById('deleted-list');
         const areaThreshold = document.getElementById('area-threshold');
         const btnIsolate = document.getElementById('btn-isolate');
-        const btnDeleteVisible = document.getElementById('btn-delete-visible');
+        const backgroundModeSelect = document.getElementById('background-mode');
 
         // Initialize
         async function init() {
@@ -719,6 +737,7 @@
                 const data = await response.json();
 
                 currentPlate = plate;
+                currentSvgData = data;
 
                 if (currentSvgType === 'segmentation') {
                     // Segmentation mode: now uses flattened polygon structure
@@ -743,13 +762,7 @@
                 hasChanges = false;
 
                 // Auto-hide labels if more than 200 shapes (performance/clutter)
-                if (polygons.length > 200) {
-                    showLabels = false;
-                    btnOverlay.classList.remove('active');
-                } else {
-                    showLabels = true;
-                    btnOverlay.classList.add('active');
-                }
+                showLabels = polygons.length <= 200;
 
                 renderSVG(data);
                 renderBlockList();
@@ -782,13 +795,39 @@
             svgCanvas.setAttribute('height', height);
             svgCanvas.setAttribute('viewBox', `0 0 ${width} ${height}`);
 
-            // Add background image
-            if (currentPlate && currentPlate.has_jpeg) {
+            // Add background based on mode
+            if (backgroundMode === 'white') {
+                const bg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+                bg.setAttribute('width', width);
+                bg.setAttribute('height', height);
+                bg.setAttribute('fill', '#ffffff');
+                svgCanvas.appendChild(bg);
+            } else if (backgroundMode === 'gray') {
+                const bg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+                bg.setAttribute('width', width);
+                bg.setAttribute('height', height);
+                bg.setAttribute('fill', '#808080');
+                svgCanvas.appendChild(bg);
+            } else if (currentPlate && currentPlate.has_jpeg) {
+                // Add SVG filter for desaturation
+                if (backgroundMode === 'desaturated') {
+                    const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+                    defs.innerHTML = `
+                        <filter id="grayscale">
+                            <feColorMatrix type="saturate" values="0"/>
+                        </filter>
+                    `;
+                    svgCanvas.appendChild(defs);
+                }
+
                 const image = document.createElementNS('http://www.w3.org/2000/svg', 'image');
                 image.setAttribute('href', `/media/${currentPlate.plate_id}.jpeg`);
                 image.setAttribute('width', width);
                 image.setAttribute('height', height);
                 image.setAttribute('opacity', '0.7');
+                if (backgroundMode === 'desaturated') {
+                    image.setAttribute('filter', 'url(#grayscale)');
+                }
                 svgCanvas.appendChild(image);
             }
 
@@ -945,7 +984,9 @@
                 if (hiddenIds.has(idx)) {
                     label.classList.add('labels-hidden');
                 }
-                label.textContent = poly.name || poly.id || `poly-${idx}`;
+                // Use short name: poly_id (p-###) if available, otherwise block_id (b-####)
+                let shortName = poly.poly_id || `b-${poly.block_id}`;
+                label.textContent = shortName;
 
                 labelsGroup.appendChild(label);
             });
@@ -1226,30 +1267,15 @@
         }
 
         function updateButtons() {
-            const hasSelection = selectedIds.size > 0;
-            const canMerge = selectedIds.size >= 2;
             const hasPlate = currentPlate !== null;
-            const hasHidden = hiddenIds.size > 0;
             const canUndo = deleteHistory.length > 0;
 
             // Both modes now use unified structure
             const itemCount = polygons.length;
 
-            // Count visible polygons
-            const visibleCount = polygons.filter((_, idx) => !hiddenIds.has(idx)).length;
-
-            btnSelectAll.disabled = !hasPlate || itemCount === 0;
-            btnDeselect.disabled = !hasSelection;
-            btnHide.disabled = !hasSelection;
-            btnShow.disabled = !hasHidden;
-            btnOverlay.disabled = !hasPlate;
-            btnDelete.disabled = !hasSelection;
-            // Merge only enabled in plate mode
-            btnMerge.disabled = !canMerge || currentSvgType === 'segmentation';
             btnSave.disabled = !hasChanges;
             btnUndelete.disabled = !canUndo;
             btnIsolate.disabled = !hasPlate || itemCount === 0;
-            btnDeleteVisible.disabled = !hasPlate || visibleCount === 0;
         }
 
         function selectAll() {
@@ -1360,10 +1386,7 @@
             selectedIds.clear();
             hasChanges = true;
 
-            renderSVG({
-                width: svgCanvas.getAttribute('width'),
-                height: svgCanvas.getAttribute('height')
-            });
+            renderSVG(currentSvgData);
             renderBlockList();
             renderDeletedList();
             updateTabCounts();
@@ -1376,7 +1399,6 @@
 
         function toggleLabels() {
             showLabels = !showLabels;
-            btnOverlay.classList.toggle('active', showLabels);
 
             document.querySelectorAll('.svg-label').forEach(label => {
                 const idx = parseInt(label.dataset.index);
@@ -1424,10 +1446,7 @@
             selectedIds.clear();
             hasChanges = true;
 
-            renderSVG({
-                width: svgCanvas.getAttribute('width'),
-                height: svgCanvas.getAttribute('height')
-            });
+            renderSVG(currentSvgData);
             renderBlockList();
             renderDeletedList();
             updateTabCounts();
@@ -1451,10 +1470,7 @@
             polygons.push(poly);
             hasChanges = true;
 
-            renderSVG({
-                width: svgCanvas.getAttribute('width'),
-                height: svgCanvas.getAttribute('height')
-            });
+            renderSVG(currentSvgData);
             renderBlockList();
             renderDeletedList();
             updateTabCounts();
@@ -1475,10 +1491,7 @@
 
             hasChanges = true;
 
-            renderSVG({
-                width: svgCanvas.getAttribute('width'),
-                height: svgCanvas.getAttribute('height')
-            });
+            renderSVG(currentSvgData);
             renderBlockList();
             renderDeletedList();
             updateTabCounts();
@@ -1540,10 +1553,7 @@
                     hiddenIds = newHiddenIds;
                     hasChanges = true;
 
-                    renderSVG({
-                        width: svgCanvas.getAttribute('width'),
-                        height: svgCanvas.getAttribute('height')
-                    });
+                    renderSVG(currentSvgData);
                     renderBlockList();
                     updateStatus();
                     updateButtons();
@@ -1725,17 +1735,16 @@
                 }
             });
 
-            btnSelectAll.addEventListener('click', selectAll);
-            btnDeselect.addEventListener('click', deselectAll);
-            btnHide.addEventListener('click', hideSelected);
-            btnShow.addEventListener('click', showAll);
-            btnOverlay.addEventListener('click', toggleLabels);
-            btnDelete.addEventListener('click', deleteSelected);
-            btnMerge.addEventListener('click', mergeSelected);
             btnSave.addEventListener('click', saveChanges);
             btnUndelete.addEventListener('click', undoDelete);
             btnIsolate.addEventListener('click', isolateSmall);
-            btnDeleteVisible.addEventListener('click', deleteVisible);
+
+            backgroundModeSelect.addEventListener('change', () => {
+                backgroundMode = backgroundModeSelect.value;
+                if (currentPlate && currentSvgData) {
+                    renderSVG(currentSvgData);
+                }
+            });
 
             btnZoomIn.addEventListener('click', zoomIn);
             btnZoomOut.addEventListener('click', zoomOut);
