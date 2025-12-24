@@ -324,6 +324,92 @@ def load_segmentation_directory(seg_dir: Path,
     print(f"Loaded {len(data.shapes)} shapes from {len(data.blocks)} blocks")
     return data
 
+
+def parse_segmentation_svg(svg_path: Path,
+                           simplify_tolerance: float = DEFAULT_SIMPLIFY_TOLERANCE
+                           ) -> SegmentationData:
+    """Parse a combined segmentation.svg file containing all blocks.
+
+    Expected structure:
+        <svg width="W" height="H" viewBox="0 0 W H">
+          <g id="block-outlines" opacity="0.3">...</g>  (ignored)
+          <g id="block-0001" transform="translate(x,y)">
+            <polygon points="..." />
+            ...
+          </g>
+          <g id="block-0002" transform="translate(x,y)">
+            ...
+          </g>
+        </svg>
+
+    Args:
+        svg_path: Path to segmentation.svg file
+        simplify_tolerance: Tolerance for polygon simplification (0 to disable)
+
+    Returns:
+        SegmentationData with all blocks and shapes loaded
+    """
+    with open(svg_path, 'r') as f:
+        content = f.read()
+
+    data = SegmentationData(source_dir=svg_path.parent)
+
+    # Extract plate dimensions from root SVG
+    svg_dims = re.search(r'<svg[^>]*width="(\d+)"[^>]*height="(\d+)"', content)
+    if svg_dims:
+        plate_width, plate_height = int(svg_dims.group(1)), int(svg_dims.group(2))
+        print(f"Plate dimensions: {plate_width}x{plate_height}")
+
+    # Find all block groups: <g id="block-XXXX" transform="translate(x,y)">
+    block_pattern = re.compile(
+        r'<g\s+id="block-(\d+)"\s+transform="translate\((\d+),(\d+)\)"[^>]*>'
+        r'(.*?)</g>',
+        re.DOTALL
+    )
+
+    for match in block_pattern.finditer(content):
+        block_id = match.group(1)
+        plate_x = int(match.group(2))
+        plate_y = int(match.group(3))
+        block_content = match.group(4)
+
+        # Calculate block dimensions from polygons
+        all_points = []
+        polygon_pattern = r'<polygon\s+points="([^"]+)"'
+        for points_str in re.findall(polygon_pattern, block_content):
+            points = parse_svg_polygon_points(points_str)
+            all_points.extend(points)
+
+        if not all_points:
+            continue
+
+        # Calculate block bounds
+        xs = [p[0] for p in all_points]
+        ys = [p[1] for p in all_points]
+        width = int(max(xs) - min(xs)) + 1
+        height = int(max(ys) - min(ys)) + 1
+
+        block = BlockContext(
+            block_id=block_id,
+            plate_x=plate_x,
+            plate_y=plate_y,
+            width=width,
+            height=height,
+            source_file=svg_path
+        )
+        data.blocks[block_id] = block
+
+        # Extract all polygons from this block
+        for points_str in re.findall(polygon_pattern, block_content):
+            points = parse_svg_polygon_points(points_str)
+            if len(points) >= 3:
+                if simplify_tolerance > 0:
+                    points = simplify_polygon(points, simplify_tolerance)
+                data.shapes.append(Shape(points=points, block=block))
+
+    print(f"Loaded {len(data.shapes)} shapes from {len(data.blocks)} blocks")
+    return data
+
 def parse_path_to_polygon(d_attr):
     """
     Parse a simple SVG path (M, L, Z commands only) into a list of (x, y) points.
@@ -753,19 +839,22 @@ def process_legacy_svg(svg_path: Path, output_path: Path,
     print(f"Wrote STL file to: {output_path}")
 
 
-def process_segmentation(seg_dir: Path, output_path: Path, use_plate_coords: bool = True,
+def process_segmentation(seg_path: Path, output_path: Path, use_plate_coords: bool = True,
                          config: Optional[HeightConfig] = None,
                          simplify_tolerance: float = DEFAULT_SIMPLIFY_TOLERANCE) -> None:
     """Process segmentation files from segment-anything.
 
     Args:
-        seg_dir: Directory containing block SVG files (e.g., output/vol1/p1/)
+        seg_path: Path to segmentation.svg file or directory containing block SVG files
         output_path: Path for output STL file
         use_plate_coords: If True, place shapes in plate coordinates; if False, use local block coords
         config: Optional height configuration (min/max stories)
         simplify_tolerance: Tolerance for polygon simplification (0 to disable)
     """
-    seg_data = load_segmentation_directory(seg_dir, simplify_tolerance)
+    if seg_path.is_file():
+        seg_data = parse_segmentation_svg(seg_path, simplify_tolerance)
+    else:
+        seg_data = load_segmentation_directory(seg_path, simplify_tolerance)
 
     if not seg_data.shapes:
         print("No shapes found in segmentation directory")
@@ -819,8 +908,8 @@ Examples:
   # Legacy mode (SVG with <path> elements)
   uv run python generate_stl.py --svg src/block.svg
 
-  # Segmentation mode (from segment-anything output)
-  uv run python generate_stl.py --segmentation ../segment-anything/output/vol1/p1/
+  # Segmentation mode (combined segmentation.svg file)
+  uv run python generate_stl.py --segmentation ../segment-anything/output/vol1/p1/segmentation.svg
 
   # Process single block SVG
   uv run python generate_stl.py --block ../segment-anything/output/vol1/p1/b-0001.svg
@@ -837,7 +926,7 @@ Examples:
         "--segmentation", "--seg",
         type=Path,
         dest="segmentation",
-        help="Path to segmentation directory (e.g., output/vol1/p1/)"
+        help="Path to segmentation.svg file (or legacy: directory with block SVGs)"
     )
     input_group.add_argument(
         "--block",
@@ -885,12 +974,15 @@ Examples:
 
     # Determine input mode and output path
     if args.segmentation:
-        seg_dir = args.segmentation
-        if not seg_dir.is_dir():
-            print(f"Error: Not a directory: {seg_dir}")
+        seg_path = args.segmentation
+        if not seg_path.exists():
+            print(f"Error: Path not found: {seg_path}")
             return 1
-        output_path = args.output or (seg_dir / "extruded.stl")
-        process_segmentation(seg_dir, output_path, use_plate_coords=not args.local_coords,
+        if seg_path.is_file():
+            output_path = args.output or seg_path.with_suffix(".stl")
+        else:
+            output_path = args.output or (seg_path / "extruded.stl")
+        process_segmentation(seg_path, output_path, use_plate_coords=not args.local_coords,
                            config=height_config, simplify_tolerance=args.simplify)
 
     elif args.block:

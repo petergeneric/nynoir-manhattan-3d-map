@@ -22,14 +22,14 @@ uv sync  # Install dependencies using uv package manager
 
 **Segmentation mode** (recommended for segment-anything output):
 ```bash
-# Process entire plate (all blocks)
-uv run python generate_stl.py --segmentation ../segment-anything/output/vol1/p1/
+# Process combined segmentation.svg file
+uv run python generate_stl.py --segmentation ../segment-anything/output/vol1/p1/segmentation.svg
 
 # Process single block
 uv run python generate_stl.py --block ../segment-anything/output/vol1/p1/b-0001.svg
 
 # Use local block coordinates instead of plate coordinates
-uv run python generate_stl.py --segmentation ../segment-anything/output/vol1/p1/ --local-coords
+uv run python generate_stl.py --segmentation ../segment-anything/output/vol1/p1/segmentation.svg --local-coords
 ```
 
 **Legacy mode** (for SVG with `<path>` elements):
@@ -62,8 +62,9 @@ Open `webviewer/index.html` in a browser (requires the STL file to be copied to 
 ### Parsing Functions
 - `parse_svg_paths()` - Extracts `<path d="...">` attributes (legacy format)
 - `parse_svg_polygon_points()` - Parses SVG polygon points strings
-- `parse_block_svg()` - Parses block SVG files with metadata attributes
-- `load_segmentation_directory()` - Loads all block SVGs from a directory
+- `parse_segmentation_svg()` - Parses combined segmentation.svg file with all blocks
+- `parse_block_svg()` - Parses individual block SVG files with metadata attributes
+- `load_segmentation_directory()` - Loads all block SVGs from a directory (legacy)
 - `parse_path_to_polygon()` - Converts SVG path commands to polygon points
 
 ### Geometry Functions
@@ -79,7 +80,29 @@ Open `webviewer/index.html` in a browser (requires the STL file to be copied to 
 
 ## Segmentation File Format
 
-Block SVG files from `../segment-anything` have this structure:
+### Combined segmentation.svg (recommended)
+
+The combined format has all blocks in a single file:
+
+```xml
+<svg xmlns="http://www.w3.org/2000/svg" width="4980" height="3334" viewBox="0 0 4980 3334">
+  <g id="block-outlines" opacity="0.3">...</g>  <!-- Block outlines (ignored) -->
+  <g id="block-0001" transform="translate(544,322)">
+    <polygon points="x1,y1 x2,y2 ..." fill="..." stroke="..." data-id="p-001" />
+    ...
+  </g>
+  <g id="block-0002" transform="translate(547,325)">
+    ...
+  </g>
+</svg>
+```
+
+Key structure:
+- `transform="translate(x,y)"` - Block's plate offset coordinates
+- `id="block-XXXX"` - Block identifier
+- Polygon points are in local block coordinates
+
+### Individual block SVG files (legacy)
 
 ```xml
 <svg xmlns="http://www.w3.org/2000/svg"
@@ -88,7 +111,6 @@ Block SVG files from `../segment-anything` have this structure:
      data-block-id="0001"
      data-plate-x="2417"
      data-plate-y="2109">
-  <!-- Block 0001 detailed segmentation -->
   <polygon points="x1,y1 x2,y2 ..." fill="..." stroke="..."/>
   ...
 </svg>
@@ -107,9 +129,8 @@ Key attributes:
 ## Input/Output
 
 **Segmentation input** (from ../segment-anything):
-- Directory: `../segment-anything/output/{volume}/{plate}/`
-- Block files: `b-0001.svg`, `b-0002.svg`, etc. or named files like `{name}.svg`
-- Output: `extruded.stl` in same directory (or custom path with `-o`)
+- Combined file: `../segment-anything/output/{volume}/{plate}/segmentation.svg`
+- Output: `segmentation.stl` in same directory (or custom path with `-o`)
 
 **Legacy input**:
 - Input: `src/nyn block test.svg` (SVG with `<path d="...">` elements)
