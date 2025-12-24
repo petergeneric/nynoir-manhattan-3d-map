@@ -1132,6 +1132,15 @@
             return area / numPoints;
         }
 
+        function formatArea(area) {
+            if (area >= 1000) {
+                const k = area / 1000;
+                // Show one decimal if less than 10k, otherwise round
+                return k < 10 ? k.toFixed(1) + 'k' : Math.round(k) + 'k';
+            }
+            return Math.round(area).toString();
+        }
+
         function renderBlockList() {
             blockList.innerHTML = '';
 
@@ -1147,8 +1156,10 @@
                 }
                 item.dataset.index = idx;
 
-                // Count vertices
-                const vertexCount = (poly.points.match(/,/g) || []).length;
+                // Calculate area, points, and complexity
+                const area = calculatePolygonArea(poly.points);
+                const pointCount = countPolygonPoints(poly.points);
+                const complexity = pointCount > 0 ? (area / pointCount).toFixed(1) : 0;
                 const displayName = poly.name || poly.id || `poly-${idx}`;
 
                 // Add indicator for container children in segmentation mode
@@ -1160,7 +1171,7 @@
                 item.innerHTML = `
                     <div class="block-color" style="background: ${poly.stroke || '#666'}"></div>
                     <span class="block-name" data-index="${idx}">${displayName}${containerIndicator}</span>
-                    <span class="block-vertices">${vertexCount} pts</span>
+                    <span class="block-vertices" title="${pointCount} pts, complexity: ${complexity}">${formatArea(area)}</span>
                 `;
 
                 item.addEventListener('click', (e) => {
@@ -1191,13 +1202,15 @@
                 item.className = 'deleted-item';
                 item.dataset.index = idx;
 
-                const vertexCount = (poly.points.match(/,/g) || []).length;
+                const area = calculatePolygonArea(poly.points);
+                const pointCount = countPolygonPoints(poly.points);
+                const complexity = pointCount > 0 ? (area / pointCount).toFixed(1) : 0;
                 const displayName = poly.name || poly.id || 'unnamed';
 
                 item.innerHTML = `
                     <div class="block-color" style="background: ${poly.stroke || '#666'}"></div>
                     <span class="block-name">${displayName}</span>
-                    <span class="block-vertices">${vertexCount} pts</span>
+                    <span class="block-vertices" title="${pointCount} pts, complexity: ${complexity}">${formatArea(area)}</span>
                     <button class="restore-btn" data-index="${idx}">Restore</button>
                 `;
 
