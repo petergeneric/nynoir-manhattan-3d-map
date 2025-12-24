@@ -223,7 +223,15 @@ def load_svg_data(svg_path: str) -> dict:
 
 
 def load_segmentation_svg_data(svg_path: str) -> dict:
-    """Load segmentation.svg and extract block data with polygons."""
+    """
+    Load segmentation.svg and extract flattened polygon data.
+
+    Blocks with multiple child polygons are treated as "container blocks" (cb-####).
+    The container block is conceptually removed, leaving only the child polygons
+    with names like "b-0001/p-001".
+
+    Blocks with a single polygon are treated as top-level buildings and kept as-is.
+    """
     tree = ET.parse(svg_path)
     root = tree.getroot()
 
@@ -231,8 +239,11 @@ def load_segmentation_svg_data(svg_path: str) -> dict:
     width = root.get('width', '0')
     height = root.get('height', '0')
 
-    # Find all block groups (id="block-0001", etc.)
-    blocks = []
+    # Collect all polygons in a flattened structure
+    polygons = []
+
+    # Track container blocks (blocks with >1 polygon)
+    container_blocks = []
 
     for elem in root:
         tag = elem.tag.replace(f'{{{SVG_NS}}}', '')
@@ -241,6 +252,7 @@ def load_segmentation_svg_data(svg_path: str) -> dict:
             if group_id.startswith('block-') and group_id != 'block-outlines':
                 # Extract block ID (e.g., "0001" from "block-0001")
                 block_id = group_id.replace('block-', '')
+                block_name = f"b-{block_id}"
 
                 # Parse transform to get position
                 transform = elem.get('transform', '')
@@ -253,7 +265,8 @@ def load_segmentation_svg_data(svg_path: str) -> dict:
                         plate_y = int(parts[1])
 
                 # Extract all polygons in this block
-                polygons = []
+                block_polygons = []
+                poly_counter = 1
                 for child in elem:
                     child_tag = child.tag.replace(f'{{{SVG_NS}}}', '')
                     if child_tag == 'polygon':
@@ -261,18 +274,62 @@ def load_segmentation_svg_data(svg_path: str) -> dict:
                         fill = child.get('fill', 'rgba(100,100,200,0.3)')
                         stroke = child.get('stroke', 'rgb(100,100,200)')
 
-                        polygons.append({
+                        # Get or assign data-id for the polygon
+                        poly_id = child.get('data-id', '')
+                        if not poly_id:
+                            poly_id = f"p-{poly_counter:03d}"
+                        poly_counter += 1
+
+                        block_polygons.append({
                             "points": points_str,
                             "fill": fill,
-                            "stroke": stroke
+                            "stroke": stroke,
+                            "poly_id": poly_id,
+                            "block_id": block_id,
+                            "plate_x": plate_x,
+                            "plate_y": plate_y
                         })
 
-                blocks.append({
-                    "block_id": block_id,
-                    "plate_x": plate_x,
-                    "plate_y": plate_y,
-                    "polygons": polygons
-                })
+                # Determine if this is a container block or a standalone building
+                if len(block_polygons) > 1:
+                    # Container block: rename to cb-#### and add all child polygons
+                    container_blocks.append({
+                        "block_id": block_id,
+                        "container_name": f"cb-{block_id}",
+                        "plate_x": plate_x,
+                        "plate_y": plate_y,
+                        "polygon_count": len(block_polygons)
+                    })
+
+                    # Add each polygon with its full name
+                    for poly in block_polygons:
+                        polygons.append({
+                            "id": f"{block_name}/{poly['poly_id']}",
+                            "name": f"{block_name}/{poly['poly_id']}",
+                            "points": poly["points"],
+                            "fill": poly["fill"],
+                            "stroke": poly["stroke"],
+                            "block_id": block_id,
+                            "poly_id": poly["poly_id"],
+                            "plate_x": plate_x,
+                            "plate_y": plate_y,
+                            "is_container_child": True
+                        })
+                elif len(block_polygons) == 1:
+                    # Single polygon - treat as top-level building
+                    poly = block_polygons[0]
+                    polygons.append({
+                        "id": block_name,
+                        "name": block_name,
+                        "points": poly["points"],
+                        "fill": poly["fill"],
+                        "stroke": poly["stroke"],
+                        "block_id": block_id,
+                        "poly_id": None,
+                        "plate_x": plate_x,
+                        "plate_y": plate_y,
+                        "is_container_child": False
+                    })
 
     # Also extract block outlines from plate.svg layer
     block_outlines = []
@@ -294,7 +351,8 @@ def load_segmentation_svg_data(svg_path: str) -> dict:
     return {
         "width": width,
         "height": height,
-        "blocks": blocks,
+        "polygons": polygons,
+        "container_blocks": container_blocks,
         "block_outlines": block_outlines,
         "svg_type": "segmentation"
     }
@@ -364,13 +422,15 @@ def save_svg_data(svg_path: str, polygons: list[dict]) -> bool:
         return False
 
 
-def save_segmentation_svg_data(svg_path: str, blocks: list[dict]) -> dict:
+def save_segmentation_svg_data(svg_path: str, polygons: list[dict]) -> dict:
     """
-    Save updated block data to both segmentation.svg and individual block files.
+    Save updated polygon data to both segmentation.svg and individual block files.
+
+    Accepts flattened polygon data and reconstructs the block structure for saving.
 
     Args:
         svg_path: Path to segmentation.svg
-        blocks: List of block data dicts with block_id, plate_x, plate_y, polygons
+        polygons: List of polygon dicts with block_id, poly_id, plate_x, plate_y, etc.
 
     Returns:
         dict with success status and details
@@ -382,10 +442,29 @@ def save_segmentation_svg_data(svg_path: str, blocks: list[dict]) -> dict:
         tree = ET.parse(svg_path)
         root = tree.getroot()
 
+        # Group polygons by block_id to reconstruct block structure
+        blocks_data = {}
+        for poly in polygons:
+            block_id = poly.get('block_id', '')
+            if not block_id:
+                continue
+
+            if block_id not in blocks_data:
+                blocks_data[block_id] = {
+                    "plate_x": poly.get('plate_x', 0),
+                    "plate_y": poly.get('plate_y', 0),
+                    "polygons": []
+                }
+
+            blocks_data[block_id]["polygons"].append({
+                "points": poly.get('points', ''),
+                "fill": poly.get('fill', 'rgba(100,100,200,0.3)'),
+                "stroke": poly.get('stroke', 'rgb(100,100,200)'),
+                "data_id": poly.get('poly_id', '')
+            })
+
         # Build a map of existing block groups
         block_groups = {}
-        elements_to_keep = []
-
         for elem in list(root):
             tag = elem.tag.replace(f'{{{SVG_NS}}}', '')
             if tag == 'g':
@@ -393,22 +472,14 @@ def save_segmentation_svg_data(svg_path: str, blocks: list[dict]) -> dict:
                 if group_id.startswith('block-') and group_id != 'block-outlines':
                     block_id = group_id.replace('block-', '')
                     block_groups[block_id] = elem
-                else:
-                    elements_to_keep.append(elem)
-            else:
-                elements_to_keep.append(elem)
 
         # Process each block
         updated_block_ids = set()
-        for block_data in blocks:
-            block_id = block_data.get('block_id', '')
-            if not block_id:
-                continue
-
+        for block_id, block_data in blocks_data.items():
             updated_block_ids.add(block_id)
             plate_x = block_data.get('plate_x', 0)
             plate_y = block_data.get('plate_y', 0)
-            polygons = block_data.get('polygons', [])
+            block_polygons = block_data.get('polygons', [])
 
             # Update or create block group in segmentation.svg
             if block_id in block_groups:
@@ -424,19 +495,21 @@ def save_segmentation_svg_data(svg_path: str, blocks: list[dict]) -> dict:
                 block_group.set('id', f'block-{block_id}')
                 block_group.set('transform', f'translate({plate_x},{plate_y})')
 
-            # Add polygons to block group
-            for poly in polygons:
+            # Add polygons to block group with data-id attributes
+            for poly in block_polygons:
                 polygon = ET.SubElement(block_group, 'polygon')
                 polygon.set('points', poly.get('points', ''))
                 polygon.set('fill', poly.get('fill', 'rgba(100,100,200,0.3)'))
                 polygon.set('stroke', poly.get('stroke', 'rgb(100,100,200)'))
                 polygon.set('stroke-width', '1')
+                if poly.get('data_id'):
+                    polygon.set('data-id', poly['data_id'])
 
             # Also update individual block SVG file
             block_svg_path = svg_dir / f"b-{block_id}.svg"
             if block_svg_path.exists():
                 try:
-                    save_block_svg(str(block_svg_path), polygons)
+                    save_block_svg(str(block_svg_path), block_polygons)
                     results["block_files"][block_id] = True
                 except Exception as e:
                     print(f"Error saving block {block_id}: {e}")
@@ -490,6 +563,9 @@ def save_block_svg(block_svg_path: str, polygons: list[dict]) -> bool:
             polygon.set('fill', poly.get('fill', 'rgba(100,100,200,0.3)'))
             polygon.set('stroke', poly.get('stroke', 'rgb(100,100,200)'))
             polygon.set('stroke-width', '1')
+            # Preserve data-id if present
+            if poly.get('data_id'):
+                polygon.set('data-id', poly['data_id'])
 
         # Write back
         tree.write(block_svg_path, encoding='unicode', xml_declaration=True)
@@ -563,24 +639,24 @@ def api_save_plate(volume, plate_id):
 
 @app.route('/api/segmentation/<volume>/<plate_id>/save', methods=['POST'])
 def api_save_segmentation(volume, plate_id):
-    """Save updated block data to segmentation.svg and individual block files."""
+    """Save updated polygon data to segmentation.svg and individual block files."""
     svg_path = OUTPUT_DIR / volume / plate_id / "segmentation.svg"
 
     if not svg_path.exists():
         return jsonify({"error": "Segmentation not found"}), 404
 
     data = request.json
-    blocks = data.get('blocks', [])
+    polygons = data.get('polygons', [])
 
-    results = save_segmentation_svg_data(str(svg_path), blocks)
+    results = save_segmentation_svg_data(str(svg_path), polygons)
 
     if results.get("segmentation_svg"):
-        block_count = len(blocks)
-        polygon_count = sum(len(b.get('polygons', [])) for b in blocks)
+        # Count unique blocks
+        block_ids = set(p.get('block_id') for p in polygons if p.get('block_id'))
         return jsonify({
             "success": True,
-            "block_count": block_count,
-            "polygon_count": polygon_count,
+            "block_count": len(block_ids),
+            "polygon_count": len(polygons),
             "block_files": results.get("block_files", {})
         })
     else:
