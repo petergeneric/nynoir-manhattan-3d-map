@@ -63,7 +63,9 @@ The `plate.svg` includes:
 
 ### Manual Editing (Web Editor)
 
-Use the built-in web editor for Stage 1 SVG cleanup:
+Use the built-in web editor for SVG cleanup. The editor supports both:
+- **plate.svg** (Stage 1 output) - Edit block outlines before Stage 2 processing
+- **segmentation.svg** (Stage 2 output) - Edit detailed segmentation polygons
 
 ```bash
 # Start the editor (opens at http://localhost:5001)
@@ -73,16 +75,28 @@ uv run python editor.py
 uv run python editor.py --port 8080 --output-dir output --media-dir /path/to/media
 ```
 
-The editor provides:
+The dropdown shows both `[plate]` and `[segmentation]` entries for each processed plate.
+
+**plate.svg mode** provides:
 - Visual display of block polygons over JPEG background image
 - Click to select, Shift+Click for multi-select
 - Delete selected blocks
 - Merge selected blocks (geometric union using Shapely)
 - Save changes back to `plate.svg`
 
+**segmentation.svg mode** provides:
+- Visual display of all detailed segmentation polygons
+- Block outlines shown with dashed lines
+- Select/delete entire blocks (with all their polygons)
+- Save changes to both `segmentation.svg` AND individual `b-XXXX.svg` files
+
 Keyboard shortcuts:
 - `Delete` / `Backspace`: Delete selected
-- `M`: Merge selected
+- `M`: Merge selected (plate mode only)
+- `U`: Undo last delete
+- `H`: Hide selected
+- `S`: Show all
+- `L`: Toggle labels
 - `Ctrl+S`: Save changes
 - `Ctrl+A`: Select all
 - `Escape`: Deselect all

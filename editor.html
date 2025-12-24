@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Stage 1 SVG Editor</title>
+    <title>SVG Editor</title>
     <style>
         * {
             box-sizing: border-box;
@@ -478,7 +478,7 @@
 </head>
 <body>
     <header>
-        <h1>Stage 1 SVG Editor</h1>
+        <h1>SVG Editor</h1>
         <div class="plate-selector">
             <label>Plate:</label>
             <select id="plate-select">
@@ -555,8 +555,11 @@
         // State
         let plates = [];
         let currentPlate = null;
-        let polygons = [];
+        let currentSvgType = 'plate';  // 'plate' or 'segmentation'
+        let polygons = [];  // Used for plate.svg mode
+        let blocks = [];    // Used for segmentation.svg mode
         let deletedPolygons = [];  // Polygons pending deletion
+        let deletedBlocks = [];    // Blocks pending deletion (segmentation mode)
         let deleteHistory = [];     // Stack of deletion batches for undo
         let selectedIds = new Set();
         let hiddenIds = new Set();
@@ -601,7 +604,9 @@
                 plates.forEach((plate, idx) => {
                     const option = document.createElement('option');
                     option.value = idx;
-                    option.textContent = `${plate.volume}/${plate.plate_id}`;
+                    const svgType = plate.svg_type || 'plate';
+                    const typeLabel = svgType === 'segmentation' ? ' [segmentation]' : ' [plate]';
+                    option.textContent = `${plate.volume}/${plate.plate_id}${typeLabel}`;
                     if (!plate.has_jpeg) {
                         option.textContent += ' (no JPEG)';
                     }
@@ -619,17 +624,39 @@
             loading.textContent = 'Loading...';
             loading.style.display = 'block';
 
+            currentSvgType = plate.svg_type || 'plate';
+
             try {
-                const response = await fetch(`/api/plate/${plate.volume}/${plate.plate_id}`);
+                let response;
+                if (currentSvgType === 'segmentation') {
+                    response = await fetch(`/api/segmentation/${plate.volume}/${plate.plate_id}`);
+                } else {
+                    response = await fetch(`/api/plate/${plate.volume}/${plate.plate_id}`);
+                }
                 const data = await response.json();
 
                 currentPlate = plate;
-                polygons = data.polygons.map((p, idx) => ({
-                    ...p,
-                    originalIndex: idx,
-                    name: p.name || `b-${String(idx + 1).padStart(4, '0')}`
-                }));
-                deletedPolygons = [];
+
+                if (currentSvgType === 'segmentation') {
+                    // Segmentation mode: work with blocks containing polygons
+                    blocks = data.blocks.map((b, idx) => ({
+                        ...b,
+                        originalIndex: idx,
+                        name: `b-${b.block_id}`
+                    }));
+                    polygons = [];
+                    deletedBlocks = [];
+                } else {
+                    // Plate mode: work with polygons directly
+                    polygons = data.polygons.map((p, idx) => ({
+                        ...p,
+                        originalIndex: idx,
+                        name: p.name || `b-${String(idx + 1).padStart(4, '0')}`
+                    }));
+                    blocks = [];
+                    deletedPolygons = [];
+                }
+
                 deleteHistory = [];
                 hiddenIds.clear();
                 hasChanges = false;
@@ -672,6 +699,18 @@
                 svgCanvas.appendChild(image);
             }
 
+            if (currentSvgType === 'segmentation') {
+                // Segmentation mode: render block outlines and block polygons
+                renderSegmentationSVG(data);
+            } else {
+                // Plate mode: render polygons directly
+                renderPlateSVG(data);
+            }
+
+            applyZoom();
+        }
+
+        function renderPlateSVG(data) {
             // Add polygons
             const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
             group.id = 'polygons';
@@ -727,7 +766,118 @@
             });
 
             svgCanvas.appendChild(labelsGroup);
-            applyZoom();
+        }
+
+        function renderSegmentationSVG(data) {
+            // Render block outlines (from plate.svg layer) - non-interactive reference layer
+            if (data.block_outlines && data.block_outlines.length > 0) {
+                const outlinesGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+                outlinesGroup.id = 'block-outlines';
+                outlinesGroup.setAttribute('opacity', '0.3');
+                outlinesGroup.style.pointerEvents = 'none';
+
+                data.block_outlines.forEach(outline => {
+                    const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+                    polygon.setAttribute('points', outline.points);
+                    polygon.setAttribute('fill', 'none');
+                    polygon.setAttribute('stroke', outline.stroke || 'rgb(102,179,92)');
+                    polygon.setAttribute('stroke-width', '3');
+                    polygon.setAttribute('stroke-dasharray', '10,5');
+                    outlinesGroup.appendChild(polygon);
+                });
+
+                svgCanvas.appendChild(outlinesGroup);
+            }
+
+            // Render each block with its polygons
+            const blocksGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+            blocksGroup.id = 'blocks';
+
+            blocks.forEach((block, blockIdx) => {
+                const blockGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+                blockGroup.id = `block-${block.block_id}`;
+                blockGroup.setAttribute('transform', `translate(${block.plate_x},${block.plate_y})`);
+                blockGroup.setAttribute('data-block-index', blockIdx);
+
+                if (hiddenIds.has(blockIdx)) {
+                    blockGroup.classList.add('hidden');
+                }
+
+                // Add each polygon (these are the detailed segmentation polygons)
+                block.polygons.forEach((poly, polyIdx) => {
+                    const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+                    polygon.setAttribute('points', poly.points);
+                    polygon.setAttribute('fill', poly.fill || 'rgba(100,150,200,0.5)');
+                    polygon.setAttribute('stroke', poly.stroke || 'rgb(100,150,200)');
+                    polygon.setAttribute('stroke-width', '1');
+                    polygon.setAttribute('data-block-index', blockIdx);
+                    polygon.setAttribute('data-polygon-index', polyIdx);
+                    polygon.classList.add('svg-polygon');
+
+                    if (selectedIds.has(blockIdx)) {
+                        polygon.classList.add('selected');
+                    }
+
+                    polygon.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        handlePolygonClick(blockIdx, e.shiftKey);
+                    });
+
+                    blockGroup.appendChild(polygon);
+                });
+
+                blocksGroup.appendChild(blockGroup);
+            });
+
+            svgCanvas.appendChild(blocksGroup);
+
+            // Add labels group for blocks
+            const labelsGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+            labelsGroup.id = 'labels';
+
+            blocks.forEach((block, blockIdx) => {
+                // Calculate centroid from first polygon or block position
+                let cx = 0, cy = 0;
+                if (block.polygons.length > 0) {
+                    const points = parsePolygonPointsForBBox(block.polygons[0].points);
+                    if (points.length > 0) {
+                        cx = points.reduce((sum, p) => sum + p.x, 0) / points.length;
+                        cy = points.reduce((sum, p) => sum + p.y, 0) / points.length;
+                    }
+                }
+
+                const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                label.setAttribute('x', block.plate_x + cx);
+                label.setAttribute('y', block.plate_y + cy);
+                label.setAttribute('text-anchor', 'middle');
+                label.setAttribute('dominant-baseline', 'middle');
+                label.setAttribute('data-index', blockIdx);
+                label.classList.add('svg-label');
+                if (!showLabels) {
+                    label.classList.add('labels-hidden');
+                }
+                if (hiddenIds.has(blockIdx)) {
+                    label.classList.add('labels-hidden');
+                }
+                label.textContent = block.name || `b-${block.block_id}`;
+
+                labelsGroup.appendChild(label);
+            });
+
+            svgCanvas.appendChild(labelsGroup);
+        }
+
+        function parsePolygonPointsForBBox(pointsStr) {
+            const points = [];
+            for (const pair of pointsStr.trim().split(/\s+/)) {
+                if (pair.includes(',')) {
+                    const [x, y] = pair.split(',').map(Number);
+                    if (!isNaN(x) && !isNaN(y)) {
+                        points.push({ x, y });
+                    }
+                }
+            }
+            return points;
         }
 
         function calculateCentroid(pointsStr) {
@@ -756,75 +906,142 @@
         function renderBlockList() {
             blockList.innerHTML = '';
 
-            polygons.forEach((poly, idx) => {
-                const item = document.createElement('div');
-                item.className = 'block-item';
-                if (selectedIds.has(idx)) {
-                    item.classList.add('selected');
-                }
-                if (hiddenIds.has(idx)) {
-                    item.classList.add('hidden');
-                }
-                item.dataset.index = idx;
-
-                // Count vertices
-                const vertexCount = (poly.points.match(/,/g) || []).length;
-                const displayName = poly.name || `b-${String(idx + 1).padStart(4, '0')}`;
-
-                item.innerHTML = `
-                    <div class="block-color" style="background: ${poly.stroke || '#666'}"></div>
-                    <span class="block-name" data-index="${idx}">${displayName}</span>
-                    <span class="block-vertices">${vertexCount} pts</span>
-                `;
-
-                item.addEventListener('click', (e) => {
-                    if (!e.target.classList.contains('block-name-input')) {
-                        handlePolygonClick(idx, e.shiftKey);
+            if (currentSvgType === 'segmentation') {
+                // Segmentation mode: show blocks
+                blocks.forEach((block, idx) => {
+                    const item = document.createElement('div');
+                    item.className = 'block-item';
+                    if (selectedIds.has(idx)) {
+                        item.classList.add('selected');
                     }
-                });
+                    if (hiddenIds.has(idx)) {
+                        item.classList.add('hidden');
+                    }
+                    item.dataset.index = idx;
 
-                // Double-click to rename
-                const nameSpan = item.querySelector('.block-name');
-                nameSpan.addEventListener('dblclick', (e) => {
-                    e.stopPropagation();
-                    startRenaming(idx, nameSpan);
-                });
+                    // Count polygons in block
+                    const polyCount = block.polygons ? block.polygons.length : 0;
+                    const displayName = block.name || `b-${block.block_id}`;
 
-                blockList.appendChild(item);
-            });
+                    item.innerHTML = `
+                        <div class="block-color" style="background: ${block.polygons[0]?.stroke || '#666'}"></div>
+                        <span class="block-name" data-index="${idx}">${displayName}</span>
+                        <span class="block-vertices">${polyCount} polys</span>
+                    `;
+
+                    item.addEventListener('click', (e) => {
+                        if (!e.target.classList.contains('block-name-input')) {
+                            handlePolygonClick(idx, e.shiftKey);
+                        }
+                    });
+
+                    blockList.appendChild(item);
+                });
+            } else {
+                // Plate mode: show polygons
+                polygons.forEach((poly, idx) => {
+                    const item = document.createElement('div');
+                    item.className = 'block-item';
+                    if (selectedIds.has(idx)) {
+                        item.classList.add('selected');
+                    }
+                    if (hiddenIds.has(idx)) {
+                        item.classList.add('hidden');
+                    }
+                    item.dataset.index = idx;
+
+                    // Count vertices
+                    const vertexCount = (poly.points.match(/,/g) || []).length;
+                    const displayName = poly.name || `b-${String(idx + 1).padStart(4, '0')}`;
+
+                    item.innerHTML = `
+                        <div class="block-color" style="background: ${poly.stroke || '#666'}"></div>
+                        <span class="block-name" data-index="${idx}">${displayName}</span>
+                        <span class="block-vertices">${vertexCount} pts</span>
+                    `;
+
+                    item.addEventListener('click', (e) => {
+                        if (!e.target.classList.contains('block-name-input')) {
+                            handlePolygonClick(idx, e.shiftKey);
+                        }
+                    });
+
+                    // Double-click to rename
+                    const nameSpan = item.querySelector('.block-name');
+                    nameSpan.addEventListener('dblclick', (e) => {
+                        e.stopPropagation();
+                        startRenaming(idx, nameSpan);
+                    });
+
+                    blockList.appendChild(item);
+                });
+            }
         }
 
         function renderDeletedList() {
             deletedList.innerHTML = '';
 
-            deletedPolygons.forEach((poly, idx) => {
-                const item = document.createElement('div');
-                item.className = 'deleted-item';
-                item.dataset.index = idx;
+            if (currentSvgType === 'segmentation') {
+                // Segmentation mode: show deleted blocks
+                deletedBlocks.forEach((block, idx) => {
+                    const item = document.createElement('div');
+                    item.className = 'deleted-item';
+                    item.dataset.index = idx;
 
-                const vertexCount = (poly.points.match(/,/g) || []).length;
-                const displayName = poly.name || 'unnamed';
+                    const polyCount = block.polygons ? block.polygons.length : 0;
+                    const displayName = block.name || `b-${block.block_id}`;
 
-                item.innerHTML = `
-                    <div class="block-color" style="background: ${poly.stroke || '#666'}"></div>
-                    <span class="block-name">${displayName}</span>
-                    <span class="block-vertices">${vertexCount} pts</span>
-                    <button class="restore-btn" data-index="${idx}">Restore</button>
-                `;
+                    item.innerHTML = `
+                        <div class="block-color" style="background: ${block.polygons?.[0]?.stroke || '#666'}"></div>
+                        <span class="block-name">${displayName}</span>
+                        <span class="block-vertices">${polyCount} polys</span>
+                        <button class="restore-btn" data-index="${idx}">Restore</button>
+                    `;
 
-                // Restore button handler
-                item.querySelector('.restore-btn').addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    restorePolygon(idx);
+                    // Restore button handler
+                    item.querySelector('.restore-btn').addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        restoreBlock(idx);
+                    });
+
+                    deletedList.appendChild(item);
                 });
+            } else {
+                // Plate mode: show deleted polygons
+                deletedPolygons.forEach((poly, idx) => {
+                    const item = document.createElement('div');
+                    item.className = 'deleted-item';
+                    item.dataset.index = idx;
 
-                deletedList.appendChild(item);
-            });
+                    const vertexCount = (poly.points.match(/,/g) || []).length;
+                    const displayName = poly.name || 'unnamed';
+
+                    item.innerHTML = `
+                        <div class="block-color" style="background: ${poly.stroke || '#666'}"></div>
+                        <span class="block-name">${displayName}</span>
+                        <span class="block-vertices">${vertexCount} pts</span>
+                        <button class="restore-btn" data-index="${idx}">Restore</button>
+                    `;
+
+                    // Restore button handler
+                    item.querySelector('.restore-btn').addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        restorePolygon(idx);
+                    });
+
+                    deletedList.appendChild(item);
+                });
+            }
         }
 
         function updateTabCounts() {
-            document.getElementById('blocks-count').textContent = polygons.length;
-            document.getElementById('deleted-count').textContent = deletedPolygons.length;
+            if (currentSvgType === 'segmentation') {
+                document.getElementById('blocks-count').textContent = blocks.length;
+                document.getElementById('deleted-count').textContent = deletedBlocks.length;
+            } else {
+                document.getElementById('blocks-count').textContent = polygons.length;
+                document.getElementById('deleted-count').textContent = deletedPolygons.length;
+            }
         }
 
         function switchTab(tabName) {
@@ -936,7 +1153,9 @@
             const blockCount = document.getElementById('block-count');
             const selectionCount = document.getElementById('selection-count');
 
-            blockCount.textContent = `${polygons.length} blocks`;
+            const count = currentSvgType === 'segmentation' ? blocks.length : polygons.length;
+            const typeLabel = currentSvgType === 'segmentation' ? 'blocks' : 'blocks';
+            blockCount.textContent = `${count} ${typeLabel}`;
 
             if (selectedIds.size > 0) {
                 selectionCount.textContent = ` | ${selectedIds.size} selected`;
@@ -945,9 +1164,9 @@
             }
 
             if (hasChanges) {
-                document.title = '* Stage 1 SVG Editor';
+                document.title = '* SVG Editor';
             } else {
-                document.title = 'Stage 1 SVG Editor';
+                document.title = 'SVG Editor';
             }
         }
 
@@ -958,20 +1177,24 @@
             const hasHidden = hiddenIds.size > 0;
             const canUndo = deleteHistory.length > 0;
 
-            btnSelectAll.disabled = !hasPlate || polygons.length === 0;
+            const itemCount = currentSvgType === 'segmentation' ? blocks.length : polygons.length;
+
+            btnSelectAll.disabled = !hasPlate || itemCount === 0;
             btnDeselect.disabled = !hasSelection;
             btnHide.disabled = !hasSelection;
             btnShow.disabled = !hasHidden;
             btnOverlay.disabled = !hasPlate;
             btnDelete.disabled = !hasSelection;
-            btnMerge.disabled = !canMerge;
+            // Disable merge in segmentation mode (blocks can't be merged)
+            btnMerge.disabled = !canMerge || currentSvgType === 'segmentation';
             btnSave.disabled = !hasChanges;
             btnUndelete.disabled = !canUndo;
         }
 
         function selectAll() {
             selectedIds.clear();
-            polygons.forEach((_, idx) => selectedIds.add(idx));
+            const items = currentSvgType === 'segmentation' ? blocks : polygons;
+            items.forEach((_, idx) => selectedIds.add(idx));
             updateSelection();
         }
 
@@ -1018,35 +1241,69 @@
             const count = selectedIds.size;
             const deletedIndices = Array.from(selectedIds).sort((a, b) => a - b);
 
-            // Move selected polygons to deleted list
-            const deletedBatch = [];
-            deletedIndices.forEach(idx => {
-                const poly = polygons[idx];
-                deletedBatch.push({
-                    ...poly,
-                    originalIndex: idx  // Track where it came from for potential restore
+            if (currentSvgType === 'segmentation') {
+                // Segmentation mode: delete blocks
+                const deletedBatch = [];
+                deletedIndices.forEach(idx => {
+                    const block = blocks[idx];
+                    deletedBatch.push({
+                        ...block,
+                        originalIndex: idx
+                    });
                 });
-            });
 
-            // Add to deleted list and history
-            deletedPolygons.push(...deletedBatch);
-            deleteHistory.push({
-                count: deletedBatch.length,
-                startIndex: deletedPolygons.length - deletedBatch.length
-            });
+                // Add to deleted list and history
+                deletedBlocks.push(...deletedBatch);
+                deleteHistory.push({
+                    count: deletedBatch.length,
+                    startIndex: deletedBlocks.length - deletedBatch.length,
+                    type: 'segmentation'
+                });
 
-            // Build new hidden indices after deletion
-            const newHiddenIds = new Set();
-            hiddenIds.forEach(hiddenIdx => {
-                if (!selectedIds.has(hiddenIdx)) {
-                    const offset = deletedIndices.filter(d => d < hiddenIdx).length;
-                    newHiddenIds.add(hiddenIdx - offset);
-                }
-            });
+                // Build new hidden indices after deletion
+                const newHiddenIds = new Set();
+                hiddenIds.forEach(hiddenIdx => {
+                    if (!selectedIds.has(hiddenIdx)) {
+                        const offset = deletedIndices.filter(d => d < hiddenIdx).length;
+                        newHiddenIds.add(hiddenIdx - offset);
+                    }
+                });
 
-            polygons = polygons.filter((_, idx) => !selectedIds.has(idx));
+                blocks = blocks.filter((_, idx) => !selectedIds.has(idx));
+                hiddenIds = newHiddenIds;
+            } else {
+                // Plate mode: delete polygons
+                const deletedBatch = [];
+                deletedIndices.forEach(idx => {
+                    const poly = polygons[idx];
+                    deletedBatch.push({
+                        ...poly,
+                        originalIndex: idx
+                    });
+                });
+
+                // Add to deleted list and history
+                deletedPolygons.push(...deletedBatch);
+                deleteHistory.push({
+                    count: deletedBatch.length,
+                    startIndex: deletedPolygons.length - deletedBatch.length,
+                    type: 'plate'
+                });
+
+                // Build new hidden indices after deletion
+                const newHiddenIds = new Set();
+                hiddenIds.forEach(hiddenIdx => {
+                    if (!selectedIds.has(hiddenIdx)) {
+                        const offset = deletedIndices.filter(d => d < hiddenIdx).length;
+                        newHiddenIds.add(hiddenIdx - offset);
+                    }
+                });
+
+                polygons = polygons.filter((_, idx) => !selectedIds.has(idx));
+                hiddenIds = newHiddenIds;
+            }
+
             selectedIds.clear();
-            hiddenIds = newHiddenIds;
             hasChanges = true;
 
             renderSVG({
@@ -1088,14 +1345,45 @@
             showToast(`Restored "${poly.name || 'block'}"`, 'success');
         }
 
+        function restoreBlock(deletedIdx) {
+            if (deletedIdx < 0 || deletedIdx >= deletedBlocks.length) return;
+
+            const block = deletedBlocks[deletedIdx];
+            deletedBlocks.splice(deletedIdx, 1);
+
+            // Clear the history since we're manually restoring
+            deleteHistory = [];
+
+            // Add back to blocks
+            blocks.push(block);
+            hasChanges = true;
+
+            renderSVG({
+                width: svgCanvas.getAttribute('width'),
+                height: svgCanvas.getAttribute('height')
+            });
+            renderBlockList();
+            renderDeletedList();
+            updateTabCounts();
+            updateStatus();
+            updateButtons();
+
+            showToast(`Restored "${block.name || 'block'}"`, 'success');
+        }
+
         function undoDelete() {
             if (deleteHistory.length === 0) return;
 
             const lastBatch = deleteHistory.pop();
-            const restoredPolygons = deletedPolygons.splice(lastBatch.startIndex, lastBatch.count);
 
-            // Add back to polygons
-            polygons.push(...restoredPolygons);
+            if (lastBatch.type === 'segmentation' || currentSvgType === 'segmentation') {
+                const restoredBlocks = deletedBlocks.splice(lastBatch.startIndex, lastBatch.count);
+                blocks.push(...restoredBlocks);
+            } else {
+                const restoredPolygons = deletedPolygons.splice(lastBatch.startIndex, lastBatch.count);
+                polygons.push(...restoredPolygons);
+            }
+
             hasChanges = true;
 
             renderSVG({
@@ -1183,19 +1471,41 @@
             if (!currentPlate || !hasChanges) return;
 
             try {
-                const response = await fetch(`/api/plate/${currentPlate.volume}/${currentPlate.plate_id}/save`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ polygons: polygons })
-                });
+                let response;
+                if (currentSvgType === 'segmentation') {
+                    // Save to segmentation endpoint (updates both segmentation.svg and block files)
+                    response = await fetch(`/api/segmentation/${currentPlate.volume}/${currentPlate.plate_id}/save`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ blocks: blocks })
+                    });
+                } else {
+                    // Save to plate endpoint
+                    response = await fetch(`/api/plate/${currentPlate.volume}/${currentPlate.plate_id}/save`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ polygons: polygons })
+                    });
+                }
 
                 const result = await response.json();
 
                 if (result.success) {
                     hasChanges = false;
+                    deletedPolygons = [];
+                    deletedBlocks = [];
+                    deleteHistory = [];
                     updateStatus();
                     updateButtons();
-                    showToast(`Saved ${result.polygon_count} blocks`, 'success');
+                    updateTabCounts();
+                    renderDeletedList();
+
+                    if (currentSvgType === 'segmentation') {
+                        const blockFileCount = Object.keys(result.block_files || {}).length;
+                        showToast(`Saved ${result.block_count} blocks (${blockFileCount} files updated)`, 'success');
+                    } else {
+                        showToast(`Saved ${result.polygon_count} blocks`, 'success');
+                    }
                 } else {
                     showToast('Save failed: ' + result.error, 'error');
                 }
@@ -1284,6 +1594,7 @@
                     selectedIds.clear();
                     hiddenIds.clear();
                     deletedPolygons = [];
+                    deletedBlocks = [];
                     deleteHistory = [];
                     switchTab('blocks');
                     loadPlate(parseInt(idx));

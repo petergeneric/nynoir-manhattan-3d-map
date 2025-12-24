@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Stage 1 SVG Editor - Web-based GUI for editing block polygons.
+SVG Editor - Web-based GUI for editing block polygons.
 
 This tool allows you to:
-- View Stage 1 SVG outputs with JPEG background
+- View Stage 1 SVG outputs (plate.svg) with JPEG background
+- View Stage 2 SVG outputs (segmentation.svg) with detailed polygons
 - Select, delete, and merge block polygons
-- Save edited SVGs for Stage 2 processing
+- Save edited SVGs (changes to segmentation.svg also update individual block files)
 
 Usage:
     uv run python editor.py [--port PORT] [--output-dir DIR] [--media-dir DIR]
@@ -130,27 +131,41 @@ def get_plates() -> list[dict]:
             if not plate_dir.is_dir():
                 continue
 
+            plate_id = plate_dir.name
             plate_svg = plate_dir / "plate.svg"
+            segmentation_svg = plate_dir / "segmentation.svg"
+
+            # Try to find corresponding JPEG
+            jpeg_path = MEDIA_DIR / f"{plate_id}.jpeg"
+            has_jpeg = jpeg_path.exists()
+
+            # Add plate.svg entry if exists
             if plate_svg.exists():
-                plate_id = plate_dir.name
-
-                # Try to find corresponding JPEG
-                jpeg_path = MEDIA_DIR / f"{plate_id}.jpeg"
-                has_jpeg = jpeg_path.exists()
-
                 plates.append({
                     "volume": volume,
                     "plate_id": plate_id,
                     "svg_path": str(plate_svg),
                     "jpeg_path": str(jpeg_path) if has_jpeg else None,
-                    "has_jpeg": has_jpeg
+                    "has_jpeg": has_jpeg,
+                    "svg_type": "plate"
+                })
+
+            # Add segmentation.svg entry if exists
+            if segmentation_svg.exists():
+                plates.append({
+                    "volume": volume,
+                    "plate_id": plate_id,
+                    "svg_path": str(segmentation_svg),
+                    "jpeg_path": str(jpeg_path) if has_jpeg else None,
+                    "has_jpeg": has_jpeg,
+                    "svg_type": "segmentation"
                 })
 
     return plates
 
 
 def load_svg_data(svg_path: str) -> dict:
-    """Load SVG and extract polygon data."""
+    """Load plate.svg and extract polygon data."""
     tree = ET.parse(svg_path)
     root = tree.getroot()
 
@@ -202,7 +217,86 @@ def load_svg_data(svg_path: str) -> dict:
         "width": width,
         "height": height,
         "metadata": metadata,
-        "polygons": polygons
+        "polygons": polygons,
+        "svg_type": "plate"
+    }
+
+
+def load_segmentation_svg_data(svg_path: str) -> dict:
+    """Load segmentation.svg and extract block data with polygons."""
+    tree = ET.parse(svg_path)
+    root = tree.getroot()
+
+    # Get dimensions
+    width = root.get('width', '0')
+    height = root.get('height', '0')
+
+    # Find all block groups (id="block-0001", etc.)
+    blocks = []
+
+    for elem in root:
+        tag = elem.tag.replace(f'{{{SVG_NS}}}', '')
+        if tag == 'g':
+            group_id = elem.get('id', '')
+            if group_id.startswith('block-') and group_id != 'block-outlines':
+                # Extract block ID (e.g., "0001" from "block-0001")
+                block_id = group_id.replace('block-', '')
+
+                # Parse transform to get position
+                transform = elem.get('transform', '')
+                plate_x, plate_y = 0, 0
+                if transform.startswith('translate('):
+                    coords = transform.replace('translate(', '').replace(')', '')
+                    parts = coords.split(',')
+                    if len(parts) == 2:
+                        plate_x = int(parts[0])
+                        plate_y = int(parts[1])
+
+                # Extract all polygons in this block
+                polygons = []
+                for child in elem:
+                    child_tag = child.tag.replace(f'{{{SVG_NS}}}', '')
+                    if child_tag == 'polygon':
+                        points_str = child.get('points', '')
+                        fill = child.get('fill', 'rgba(100,100,200,0.3)')
+                        stroke = child.get('stroke', 'rgb(100,100,200)')
+
+                        polygons.append({
+                            "points": points_str,
+                            "fill": fill,
+                            "stroke": stroke
+                        })
+
+                blocks.append({
+                    "block_id": block_id,
+                    "plate_x": plate_x,
+                    "plate_y": plate_y,
+                    "polygons": polygons
+                })
+
+    # Also extract block outlines from plate.svg layer
+    block_outlines = []
+    outlines_group = root.find(f'.//{{{SVG_NS}}}g[@id="block-outlines"]')
+    if outlines_group is None:
+        outlines_group = root.find('.//g[@id="block-outlines"]')
+
+    if outlines_group is not None:
+        for elem in outlines_group:
+            tag = elem.tag.replace(f'{{{SVG_NS}}}', '')
+            if tag == 'polygon':
+                points_str = elem.get('points', '')
+                stroke = elem.get('stroke', 'rgb(102,179,92)')
+                block_outlines.append({
+                    "points": points_str,
+                    "stroke": stroke
+                })
+
+    return {
+        "width": width,
+        "height": height,
+        "blocks": blocks,
+        "block_outlines": block_outlines,
+        "svg_type": "segmentation"
     }
 
 
@@ -270,6 +364,142 @@ def save_svg_data(svg_path: str, polygons: list[dict]) -> bool:
         return False
 
 
+def save_segmentation_svg_data(svg_path: str, blocks: list[dict]) -> dict:
+    """
+    Save updated block data to both segmentation.svg and individual block files.
+
+    Args:
+        svg_path: Path to segmentation.svg
+        blocks: List of block data dicts with block_id, plate_x, plate_y, polygons
+
+    Returns:
+        dict with success status and details
+    """
+    svg_dir = Path(svg_path).parent
+    results = {"segmentation_svg": False, "block_files": {}}
+
+    try:
+        tree = ET.parse(svg_path)
+        root = tree.getroot()
+
+        # Build a map of existing block groups
+        block_groups = {}
+        elements_to_keep = []
+
+        for elem in list(root):
+            tag = elem.tag.replace(f'{{{SVG_NS}}}', '')
+            if tag == 'g':
+                group_id = elem.get('id', '')
+                if group_id.startswith('block-') and group_id != 'block-outlines':
+                    block_id = group_id.replace('block-', '')
+                    block_groups[block_id] = elem
+                else:
+                    elements_to_keep.append(elem)
+            else:
+                elements_to_keep.append(elem)
+
+        # Process each block
+        updated_block_ids = set()
+        for block_data in blocks:
+            block_id = block_data.get('block_id', '')
+            if not block_id:
+                continue
+
+            updated_block_ids.add(block_id)
+            plate_x = block_data.get('plate_x', 0)
+            plate_y = block_data.get('plate_y', 0)
+            polygons = block_data.get('polygons', [])
+
+            # Update or create block group in segmentation.svg
+            if block_id in block_groups:
+                block_group = block_groups[block_id]
+                # Clear existing polygons but keep comments
+                for child in list(block_group):
+                    child_tag = child.tag.replace(f'{{{SVG_NS}}}', '')
+                    if child_tag == 'polygon':
+                        block_group.remove(child)
+            else:
+                # Create new block group
+                block_group = ET.SubElement(root, 'g')
+                block_group.set('id', f'block-{block_id}')
+                block_group.set('transform', f'translate({plate_x},{plate_y})')
+
+            # Add polygons to block group
+            for poly in polygons:
+                polygon = ET.SubElement(block_group, 'polygon')
+                polygon.set('points', poly.get('points', ''))
+                polygon.set('fill', poly.get('fill', 'rgba(100,100,200,0.3)'))
+                polygon.set('stroke', poly.get('stroke', 'rgb(100,100,200)'))
+                polygon.set('stroke-width', '1')
+
+            # Also update individual block SVG file
+            block_svg_path = svg_dir / f"b-{block_id}.svg"
+            if block_svg_path.exists():
+                try:
+                    save_block_svg(str(block_svg_path), polygons)
+                    results["block_files"][block_id] = True
+                except Exception as e:
+                    print(f"Error saving block {block_id}: {e}")
+                    results["block_files"][block_id] = False
+
+        # Remove block groups that are no longer in the data
+        for block_id, group in block_groups.items():
+            if block_id not in updated_block_ids:
+                root.remove(group)
+                # Optionally delete the individual block file
+                block_svg_path = svg_dir / f"b-{block_id}.svg"
+                if block_svg_path.exists():
+                    try:
+                        block_svg_path.unlink()
+                        results["block_files"][block_id] = "deleted"
+                    except Exception as e:
+                        print(f"Error deleting block file {block_id}: {e}")
+
+        # Write back segmentation.svg
+        tree.write(svg_path, encoding='unicode', xml_declaration=True)
+        results["segmentation_svg"] = True
+
+    except Exception as e:
+        print(f"Error saving segmentation SVG: {e}")
+        results["error"] = str(e)
+
+    return results
+
+
+def save_block_svg(block_svg_path: str, polygons: list[dict]) -> bool:
+    """
+    Save updated polygon data to an individual block SVG file.
+
+    Preserves the root element attributes (data-block-id, data-plate-x, etc.)
+    and updates only the polygon content.
+    """
+    try:
+        tree = ET.parse(block_svg_path)
+        root = tree.getroot()
+
+        # Remove existing polygons
+        for child in list(root):
+            child_tag = child.tag.replace(f'{{{SVG_NS}}}', '')
+            if child_tag == 'polygon':
+                root.remove(child)
+
+        # Add updated polygons
+        for poly in polygons:
+            polygon = ET.SubElement(root, 'polygon')
+            polygon.set('points', poly.get('points', ''))
+            polygon.set('fill', poly.get('fill', 'rgba(100,100,200,0.3)'))
+            polygon.set('stroke', poly.get('stroke', 'rgb(100,100,200)'))
+            polygon.set('stroke-width', '1')
+
+        # Write back
+        tree.write(block_svg_path, encoding='unicode', xml_declaration=True)
+        return True
+
+    except Exception as e:
+        print(f"Error saving block SVG {block_svg_path}: {e}")
+        return False
+
+
 # Flask routes
 
 @app.route('/')
@@ -286,7 +516,7 @@ def api_plates():
 
 @app.route('/api/plate/<volume>/<plate_id>')
 def api_plate(volume, plate_id):
-    """Get SVG data for a specific plate."""
+    """Get SVG data for a specific plate (plate.svg)."""
     svg_path = OUTPUT_DIR / volume / plate_id / "plate.svg"
 
     if not svg_path.exists():
@@ -299,9 +529,24 @@ def api_plate(volume, plate_id):
     return jsonify(data)
 
 
+@app.route('/api/segmentation/<volume>/<plate_id>')
+def api_segmentation(volume, plate_id):
+    """Get SVG data for a segmentation file (segmentation.svg)."""
+    svg_path = OUTPUT_DIR / volume / plate_id / "segmentation.svg"
+
+    if not svg_path.exists():
+        return jsonify({"error": "Segmentation not found"}), 404
+
+    data = load_segmentation_svg_data(str(svg_path))
+    data["volume"] = volume
+    data["plate_id"] = plate_id
+
+    return jsonify(data)
+
+
 @app.route('/api/plate/<volume>/<plate_id>/save', methods=['POST'])
 def api_save_plate(volume, plate_id):
-    """Save updated polygon data."""
+    """Save updated polygon data to plate.svg."""
     svg_path = OUTPUT_DIR / volume / plate_id / "plate.svg"
 
     if not svg_path.exists():
@@ -314,6 +559,32 @@ def api_save_plate(volume, plate_id):
         return jsonify({"success": True, "polygon_count": len(polygons)})
     else:
         return jsonify({"error": "Failed to save"}), 500
+
+
+@app.route('/api/segmentation/<volume>/<plate_id>/save', methods=['POST'])
+def api_save_segmentation(volume, plate_id):
+    """Save updated block data to segmentation.svg and individual block files."""
+    svg_path = OUTPUT_DIR / volume / plate_id / "segmentation.svg"
+
+    if not svg_path.exists():
+        return jsonify({"error": "Segmentation not found"}), 404
+
+    data = request.json
+    blocks = data.get('blocks', [])
+
+    results = save_segmentation_svg_data(str(svg_path), blocks)
+
+    if results.get("segmentation_svg"):
+        block_count = len(blocks)
+        polygon_count = sum(len(b.get('polygons', [])) for b in blocks)
+        return jsonify({
+            "success": True,
+            "block_count": block_count,
+            "polygon_count": polygon_count,
+            "block_files": results.get("block_files", {})
+        })
+    else:
+        return jsonify({"error": results.get("error", "Failed to save")}), 500
 
 
 @app.route('/api/merge', methods=['POST'])
@@ -355,7 +626,7 @@ def serve_media(filename):
 def main():
     global OUTPUT_DIR, MEDIA_DIR
 
-    parser = argparse.ArgumentParser(description='Stage 1 SVG Editor')
+    parser = argparse.ArgumentParser(description='SVG Editor for plate.svg and segmentation.svg files')
     parser.add_argument('--port', type=int, default=5001, help='Port to run on')
     parser.add_argument('--output-dir', type=str, default='output',
                         help='Output directory containing plate SVGs')
