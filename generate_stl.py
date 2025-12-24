@@ -23,6 +23,22 @@ from stl import mesh
 # Story height in the same units as the SVG (pixels)
 STORY_HEIGHT = 10  # Each story is 10 units tall
 
+# Area thresholds for height rules
+MIN_AREA_THRESHOLD = 2200   # Small polygons - bias toward lower heights
+EDGE_SMALL_AREA = 3000      # Edge objects smaller than this = 1 story
+MAX_AREA_THRESHOLD = 200000 # Skip polygons larger than this
+
+# Edge detection tolerance
+EDGE_OVERLAP_TOLERANCE = 5  # Pixels of overlap allowed when checking for blocking shapes
+
+
+@dataclass
+class HeightConfig:
+    """Configuration for height generation."""
+    min_stories: float = 1.0
+    max_stories: float = 7.0
+    story_height: float = STORY_HEIGHT
+
 
 @dataclass
 class BlockContext:
@@ -85,6 +101,88 @@ class SegmentationData:
     def get_block_for_shape(self, shape: Shape) -> Optional[BlockContext]:
         """Get the block context for a shape."""
         return shape.block
+
+
+def ranges_overlap(a_min: float, a_max: float, b_min: float, b_max: float,
+                   tolerance: float = EDGE_OVERLAP_TOLERANCE) -> bool:
+    """Check if two 1D ranges overlap by more than tolerance pixels."""
+    overlap = min(a_max, b_max) - max(a_min, b_min)
+    return overlap > tolerance
+
+
+def is_at_block_edge(shape: Shape, seg_data: Optional[SegmentationData] = None) -> bool:
+    """Check if shape can reach any block boundary without intersecting other shapes.
+
+    A shape is considered at the edge if it can "see" a block boundary in at least
+    one cardinal direction (north/south/east/west) without another shape blocking
+    the path (with >5px overlap tolerance).
+
+    Args:
+        shape: The shape to check
+        seg_data: Segmentation data containing all shapes in the block
+
+    Returns:
+        True if shape is at block edge in any direction
+    """
+    if shape.block is None or seg_data is None:
+        return False
+
+    block = shape.block
+    bounds = shape.local_bounds
+    if bounds is None:
+        return False
+
+    min_x, min_y, max_x, max_y = bounds
+
+    # Get all other shapes in the same block
+    block_shapes = seg_data.shapes_in_block(block.block_id)
+    other_shapes = [s for s in block_shapes if s is not shape and s.local_bounds is not None]
+
+    # Check each cardinal direction
+    # North: Can we reach y=0?
+    north_clear = True
+    for other in other_shapes:
+        o_min_x, o_min_y, o_max_x, o_max_y = other.local_bounds
+        # Does this shape block our path north? (overlaps horizontally AND is north of us)
+        if ranges_overlap(min_x, max_x, o_min_x, o_max_x) and o_min_y < min_y:
+            north_clear = False
+            break
+
+    if north_clear:
+        return True
+
+    # South: Can we reach y=block.height?
+    south_clear = True
+    for other in other_shapes:
+        o_min_x, o_min_y, o_max_x, o_max_y = other.local_bounds
+        if ranges_overlap(min_x, max_x, o_min_x, o_max_x) and o_max_y > max_y:
+            south_clear = False
+            break
+
+    if south_clear:
+        return True
+
+    # West: Can we reach x=0?
+    west_clear = True
+    for other in other_shapes:
+        o_min_x, o_min_y, o_max_x, o_max_y = other.local_bounds
+        if ranges_overlap(min_y, max_y, o_min_y, o_max_y) and o_min_x < min_x:
+            west_clear = False
+            break
+
+    if west_clear:
+        return True
+
+    # East: Can we reach x=block.width?
+    east_clear = True
+    for other in other_shapes:
+        o_min_x, o_min_y, o_max_x, o_max_y = other.local_bounds
+        if ranges_overlap(min_y, max_y, o_min_y, o_max_y) and o_max_x > max_x:
+            east_clear = False
+            break
+
+    return east_clear
+
 
 def parse_svg_paths(svg_content: str) -> List[str]:
     """Extract all path 'd' attributes from the SVG (legacy format)."""
@@ -303,9 +401,63 @@ def get_weighted_random_stories():
     """
     Return a random number of stories between 2-5, weighted towards 2.
     Weights: 2 stories (50%), 3 stories (25%), 4 stories (15%), 5 stories (10%)
+    Legacy function - kept for backwards compatibility with legacy SVG mode.
     """
     choices = [2, 2, 2, 2, 2, 3, 3, 3, 4, 4, 5]
     return random.choice(choices)
+
+
+def get_random_stories(min_stories: float = 1.0, max_stories: float = 7.0,
+                       bias_low: bool = False) -> float:
+    """Generate a random story count with weighted distribution.
+
+    Heights are generated in 0.25 increments. Stories above 5 are less likely.
+
+    Args:
+        min_stories: Minimum number of stories (default 1.0)
+        max_stories: Maximum number of stories (default 7.0)
+        bias_low: If True, bias toward lower heights (for small areas)
+
+    Returns:
+        Number of stories as a float (e.g., 2.25, 3.5)
+    """
+    # Generate possible values in 0.25 increments
+    values = []
+    weights = []
+
+    current = min_stories
+    while current <= max_stories + 0.001:  # Small epsilon for float comparison
+        values.append(current)
+
+        # Base weight calculation
+        if current <= 3.0:
+            weight = 1.0
+        elif current <= 5.0:
+            weight = 0.8
+        else:
+            # Exponential decay for heights > 5
+            weight = 0.3 * (0.7 ** (current - 5.0))
+
+        # Apply low bias for small areas
+        if bias_low:
+            if current <= 2.0:
+                weight *= 1.5
+            elif current <= 3.0:
+                weight *= 1.0
+            else:
+                weight *= 0.5
+
+        weights.append(weight)
+        current += 0.25
+
+    if not values:
+        return min_stories
+
+    # Normalize weights and select
+    total = sum(weights)
+    weights = [w / total for w in weights]
+
+    return random.choices(values, weights=weights, k=1)[0]
 
 def compute_normal(v0, v1, v2):
     """Compute the normal vector for a triangle."""
@@ -457,26 +609,55 @@ def create_stl_mesh(triangles):
 
     return stl_mesh
 
-def get_height_for_shape(shape: Shape, seg_data: Optional[SegmentationData] = None) -> float:
-    """Determine extrusion height for a shape.
+def get_height_for_shape(shape: Shape, seg_data: Optional[SegmentationData] = None,
+                         config: Optional[HeightConfig] = None) -> Optional[float]:
+    """Determine extrusion height for a shape based on elevation rules.
 
-    This function can be extended to use block context for smarter height assignment.
-    For now, uses weighted random stories.
+    Rules applied:
+    1. Skip polygons with area > 200,000
+    2. Edge objects with area < 3000 get 1 story
+    3. Edge objects with area >= 3000 get at least 2 stories
+    4. Small polygons (area < 2200) bias toward lower heights
+    5. Heights above 5 stories are less likely
 
     Args:
         shape: The shape to get height for
         seg_data: Optional segmentation data for context-aware height generation
+        config: Optional height configuration (min/max stories)
 
     Returns:
-        Height in SVG units
+        Height in SVG units, or None if shape should be skipped
     """
-    # TODO: Use block context for smarter height generation
-    # For example:
-    # - Shapes near block edges could be taller
-    # - Shapes in certain blocks could have different height distributions
-    # - Larger shapes could be taller buildings
-    stories = get_weighted_random_stories()
-    return stories * STORY_HEIGHT
+    if config is None:
+        config = HeightConfig()
+
+    area = shape.area
+
+    # Rule 1: Skip large polygons
+    if area > MAX_AREA_THRESHOLD:
+        return None
+
+    # Check if shape is at block edge
+    at_edge = is_at_block_edge(shape, seg_data)
+
+    # Rule 2 & 3: Edge object rules
+    if at_edge:
+        if area < EDGE_SMALL_AREA:
+            # Small edge objects get 1 story
+            return 1.0 * config.story_height
+        else:
+            # Larger edge objects get at least 2 stories
+            min_stories = max(2.0, config.min_stories)
+            bias_low = area < MIN_AREA_THRESHOLD
+            stories = get_random_stories(min_stories, config.max_stories, bias_low=bias_low)
+            return stories * config.story_height
+
+    # Rule 4: Small polygon bias
+    bias_low = area < MIN_AREA_THRESHOLD
+
+    # Generate random height with appropriate bias
+    stories = get_random_stories(config.min_stories, config.max_stories, bias_low=bias_low)
+    return stories * config.story_height
 
 
 def process_legacy_svg(svg_path: Path, output_path: Path) -> None:
@@ -511,13 +692,15 @@ def process_legacy_svg(svg_path: Path, output_path: Path) -> None:
     print(f"Wrote STL file to: {output_path}")
 
 
-def process_segmentation(seg_dir: Path, output_path: Path, use_plate_coords: bool = True) -> None:
+def process_segmentation(seg_dir: Path, output_path: Path, use_plate_coords: bool = True,
+                         config: Optional[HeightConfig] = None) -> None:
     """Process segmentation files from segment-anything.
 
     Args:
         seg_dir: Directory containing block SVG files (e.g., output/vol1/p1/)
         output_path: Path for output STL file
         use_plate_coords: If True, place shapes in plate coordinates; if False, use local block coords
+        config: Optional height configuration (min/max stories)
     """
     seg_data = load_segmentation_directory(seg_dir)
 
@@ -527,6 +710,7 @@ def process_segmentation(seg_dir: Path, output_path: Path, use_plate_coords: boo
 
     all_triangles = []
     successful_buildings = 0
+    skipped_buildings = 0
 
     for i, shape in enumerate(seg_data.shapes):
         # Get coordinates (plate or local)
@@ -538,7 +722,12 @@ def process_segmentation(seg_dir: Path, output_path: Path, use_plate_coords: boo
         if len(points) < 3:
             continue
 
-        height = get_height_for_shape(shape, seg_data)
+        height = get_height_for_shape(shape, seg_data, config)
+
+        # Skip shapes with None height (e.g., too large)
+        if height is None:
+            skipped_buildings += 1
+            continue
 
         try:
             triangles = extrude_polygon_to_mesh(points, height)
@@ -549,6 +738,8 @@ def process_segmentation(seg_dir: Path, output_path: Path, use_plate_coords: boo
             print(f"Warning: Failed to process shape {i}{block_info}: {e}")
 
     print(f"Successfully processed {successful_buildings} buildings")
+    if skipped_buildings > 0:
+        print(f"Skipped {skipped_buildings} shapes (area > {MAX_AREA_THRESHOLD})")
     print(f"Total triangles: {len(all_triangles)}")
 
     stl_mesh = create_stl_mesh(all_triangles)
@@ -601,8 +792,26 @@ Examples:
         action="store_true",
         help="Use local block coordinates instead of plate coordinates"
     )
+    parser.add_argument(
+        "--min-stories",
+        type=float,
+        default=1.0,
+        help="Minimum building height in stories (default: 1.0)"
+    )
+    parser.add_argument(
+        "--max-stories",
+        type=float,
+        default=7.0,
+        help="Maximum building height in stories (default: 7.0)"
+    )
 
     args = parser.parse_args()
+
+    # Create height configuration from CLI args
+    height_config = HeightConfig(
+        min_stories=args.min_stories,
+        max_stories=args.max_stories
+    )
 
     # Determine input mode and output path
     if args.segmentation:
@@ -611,7 +820,8 @@ Examples:
             print(f"Error: Not a directory: {seg_dir}")
             return 1
         output_path = args.output or (seg_dir / "extruded.stl")
-        process_segmentation(seg_dir, output_path, use_plate_coords=not args.local_coords)
+        process_segmentation(seg_dir, output_path, use_plate_coords=not args.local_coords,
+                           config=height_config)
 
     elif args.block:
         block_path = args.block
@@ -633,11 +843,15 @@ Examples:
 
         all_triangles = []
         successful = 0
+        skipped = 0
         for i, shape in enumerate(shapes):
             points = shape.points if args.local_coords else shape.to_plate_coords()
             if len(points) < 3:
                 continue
-            height = get_height_for_shape(shape, seg_data)
+            height = get_height_for_shape(shape, seg_data, height_config)
+            if height is None:
+                skipped += 1
+                continue
             try:
                 triangles = extrude_polygon_to_mesh(points, height)
                 all_triangles.extend(triangles)
@@ -646,6 +860,8 @@ Examples:
                 print(f"Warning: Failed to process shape {i}: {e}")
 
         print(f"Successfully processed {successful} shapes from block")
+        if skipped > 0:
+            print(f"Skipped {skipped} shapes (area > {MAX_AREA_THRESHOLD})")
         print(f"Total triangles: {len(all_triangles)}")
 
         stl_mesh = create_stl_mesh(all_triangles)
