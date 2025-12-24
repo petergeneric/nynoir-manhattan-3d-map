@@ -99,6 +99,7 @@ Keyboard shortcuts:
 - `I`: Isolate small polygons (hide all with area > threshold)
 - `X`: Delete all visible polygons
 - `L`: Toggle labels
+- `F`: Flash all visible polygons on/off (press again to stop)
 - `Ctrl+S`: Save changes
 - `Ctrl+A`: Select all
 - `Escape`: Deselect all

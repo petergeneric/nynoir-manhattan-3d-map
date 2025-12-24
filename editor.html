@@ -614,6 +614,7 @@
                 <kbd>I</kbd> Isolate small &nbsp;
                 <kbd>X</kbd> Del visible &nbsp;
                 <kbd>L</kbd> Labels &nbsp;
+                <kbd>F</kbd> Flash &nbsp;
                 <kbd>Ctrl+S</kbd> Save
             </div>
         </div>
@@ -636,6 +637,7 @@
         let activeTab = 'blocks';
         let backgroundMode = 'image';  // 'white', 'gray', 'image', 'desaturated'
         let currentSvgData = null;  // Store current SVG data for re-renders
+        let flashInterval = null;  // Interval ID for flash animation
 
         // DOM elements
         const plateSelect = document.getElementById('plate-select');
@@ -721,6 +723,12 @@
         async function loadPlate(index) {
             const plate = plates[index];
             if (!plate) return;
+
+            // Stop any active flash animation
+            if (flashInterval) {
+                clearInterval(flashInterval);
+                flashInterval = null;
+            }
 
             loading.textContent = 'Loading...';
             loading.style.display = 'block';
@@ -1407,6 +1415,34 @@
             });
         }
 
+        function toggleFlash() {
+            if (flashInterval) {
+                // Stop flashing - restore visibility
+                clearInterval(flashInterval);
+                flashInterval = null;
+                document.querySelectorAll('.svg-polygon').forEach(poly => {
+                    const idx = parseInt(poly.dataset.index);
+                    if (!hiddenIds.has(idx)) {
+                        poly.style.opacity = '';
+                    }
+                });
+                showToast('Flash stopped', 'info');
+            } else {
+                // Start flashing
+                let isVisible = true;
+                flashInterval = setInterval(() => {
+                    isVisible = !isVisible;
+                    document.querySelectorAll('.svg-polygon').forEach(poly => {
+                        const idx = parseInt(poly.dataset.index);
+                        if (!hiddenIds.has(idx)) {
+                            poly.style.opacity = isVisible ? '' : '0';
+                        }
+                    });
+                }, 400);  // Flash every 400ms
+                showToast('Flashing polygons (press F to stop)', 'info');
+            }
+        }
+
         function deleteSelected() {
             if (selectedIds.size === 0) return;
 
@@ -1785,6 +1821,9 @@
                 } else if (e.key === 'x' || e.key === 'X') {
                     e.preventDefault();
                     deleteVisible();
+                } else if (e.key === 'f' || e.key === 'F') {
+                    e.preventDefault();
+                    toggleFlash();
                 } else if ((e.ctrlKey || e.metaKey) && e.key === 's') {
                     e.preventDefault();
                     saveChanges();
