@@ -609,6 +609,7 @@
                 <kbd>Delete</kbd> Delete &nbsp;
                 <kbd>U</kbd> Undelete &nbsp;
                 <kbd>M</kbd> Merge &nbsp;
+                <kbd>Z</kbd> Cut from overlapping &nbsp;
                 <kbd>H</kbd> Hide &nbsp;
                 <kbd>S</kbd> Show all &nbsp;
                 <kbd>I</kbd> Isolate small &nbsp;
@@ -1299,7 +1300,15 @@
         }
 
         function hideSelected() {
-            if (selectedIds.size === 0) return;
+            if (selectedIds.size === 0) {
+                // Hide all polygons when none selected
+                const count = polygons.length - hiddenIds.size;
+                if (count === 0) return;
+                polygons.forEach((_, idx) => hiddenIds.add(idx));
+                updateSelection();
+                showToast(`Hidden all ${count} polygon(s)`, 'success');
+                return;
+            }
 
             const count = selectedIds.size;
             selectedIds.forEach(idx => hiddenIds.add(idx));
@@ -1603,6 +1612,84 @@
             }
         }
 
+        async function cutSelectedFromAll() {
+            if (selectedIds.size === 0) {
+                showToast('No polygons selected to cut', 'warning');
+                return;
+            }
+
+            const selectedIndices = Array.from(selectedIds).sort((a, b) => a - b);
+            const cutterPolygons = [];
+            const targetPolygons = [];
+            const targetOriginalData = [];  // Keep metadata for non-selected polygons
+
+            polygons.forEach((poly, idx) => {
+                if (selectedIds.has(idx)) {
+                    cutterPolygons.push(poly.points);
+                } else {
+                    targetPolygons.push(poly.points);
+                    targetOriginalData.push(poly);
+                }
+            });
+
+            try {
+                const response = await fetch('/api/cut', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        cutter_polygons: cutterPolygons,
+                        target_polygons: targetPolygons
+                    })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    // Build new hidden indices
+                    const newHiddenIds = new Set();
+                    hiddenIds.forEach(hiddenIdx => {
+                        if (!selectedIds.has(hiddenIdx)) {
+                            const offset = selectedIndices.filter(d => d < hiddenIdx).length;
+                            newHiddenIds.add(hiddenIdx - offset);
+                        }
+                    });
+
+                    // Rebuild polygons array: use result polygons with original metadata where possible
+                    const newPolygons = [];
+                    result.result_polygons.forEach((points, i) => {
+                        const original = targetOriginalData[i] || targetOriginalData[0] || {};
+                        newPolygons.push({
+                            id: original.id || 'cut-result',
+                            points: points,
+                            fill: original.fill || 'rgba(100,100,200,0.3)',
+                            stroke: original.stroke || 'rgb(100,100,200)',
+                            name: original.name,
+                            block_id: original.block_id,
+                            poly_id: original.poly_id,
+                            plate_x: original.plate_x,
+                            plate_y: original.plate_y
+                        });
+                    });
+
+                    polygons = newPolygons;
+                    selectedIds.clear();
+                    hiddenIds = newHiddenIds;
+                    hasChanges = true;
+
+                    renderSVG(currentSvgData);
+                    renderBlockList();
+                    updateStatus();
+                    updateButtons();
+
+                    showToast(`Cut ${cutterPolygons.length} polygon(s) from overlapping areas`, 'success');
+                } else {
+                    showToast('Cut failed: ' + (result.error || 'Unknown error'), 'error');
+                }
+            } catch (error) {
+                showToast('Cut failed: ' + error.message, 'error');
+            }
+        }
+
         async function saveChanges() {
             if (!currentPlate || !hasChanges) return;
 
@@ -1806,6 +1893,9 @@
                 } else if (e.key === 'm' || e.key === 'M') {
                     e.preventDefault();
                     mergeSelected();
+                } else if (e.key === 'z' || e.key === 'Z') {
+                    e.preventDefault();
+                    cutSelectedFromAll();
                 } else if (e.key === 'h' || e.key === 'H') {
                     e.preventDefault();
                     hideSelected();
