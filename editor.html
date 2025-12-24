@@ -537,6 +537,43 @@
         .toolbar button.isolate:hover:not(:disabled) {
             background: #a57d1a;
         }
+
+        .complexity-filter {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-right: 10px;
+        }
+
+        .complexity-filter label {
+            color: #888;
+            font-size: 12px;
+            white-space: nowrap;
+        }
+
+        .complexity-filter input {
+            background: #0f3460;
+            color: #fff;
+            border: 1px solid #1a1a2e;
+            padding: 6px 8px;
+            border-radius: 4px;
+            font-size: 13px;
+            width: 70px;
+            text-align: right;
+        }
+
+        .complexity-filter input:focus {
+            outline: none;
+            border-color: #4a8aca;
+        }
+
+        .toolbar button.select-complexity {
+            background: #5a4a8b;
+        }
+
+        .toolbar button.select-complexity:hover:not(:disabled) {
+            background: #6b5a9c;
+        }
     </style>
 </head>
 <body>
@@ -567,6 +604,11 @@
                 <input type="number" id="area-threshold" value="100" min="0" step="10">
             </div>
             <button id="btn-isolate" class="isolate" disabled title="Isolate small polygons (I)">Isolate</button>
+            <div class="complexity-filter">
+                <label>Complexity ≤</label>
+                <input type="number" id="complexity-threshold" value="10" min="0" step="1">
+            </div>
+            <button id="btn-select-complexity" class="select-complexity" disabled title="Select polygons by complexity (area/points)">Select</button>
             <button id="btn-save" class="primary" disabled>Save Changes</button>
         </div>
     </header>
@@ -645,6 +687,7 @@
         let backgroundMode = 'image';  // 'white', 'gray', 'image', 'desaturated'
         let currentSvgData = null;  // Store current SVG data for re-renders
         let flashInterval = null;  // Interval ID for flash animation
+        let isolationMode = null;  // 'area', 'complexity', or null
 
         // DOM elements
         const plateSelect = document.getElementById('plate-select');
@@ -661,6 +704,8 @@
         const deletedList = document.getElementById('deleted-list');
         const areaThreshold = document.getElementById('area-threshold');
         const btnIsolate = document.getElementById('btn-isolate');
+        const complexityThreshold = document.getElementById('complexity-threshold');
+        const btnSelectComplexity = document.getElementById('btn-select-complexity');
         const backgroundModeSelect = document.getElementById('background-mode');
 
         // Initialize
@@ -774,6 +819,7 @@
                 deletedPolygons = [];
                 deleteHistory = [];
                 hiddenIds.clear();
+                isolationMode = null;
                 hasChanges = false;
 
                 // Auto-hide labels if more than 200 shapes (performance/clutter)
@@ -1069,6 +1115,23 @@
             return Math.abs(area) / 2;
         }
 
+        function countPolygonPoints(pointsStr) {
+            let count = 0;
+            for (const pair of pointsStr.trim().split(/\s+/)) {
+                if (pair.includes(',')) {
+                    count++;
+                }
+            }
+            return count;
+        }
+
+        function calculatePolygonComplexity(pointsStr) {
+            const area = calculatePolygonArea(pointsStr);
+            const numPoints = countPolygonPoints(pointsStr);
+            if (numPoints === 0) return Infinity;
+            return area / numPoints;
+        }
+
         function renderBlockList() {
             blockList.innerHTML = '';
 
@@ -1291,6 +1354,7 @@
             btnSave.disabled = !hasChanges;
             btnUndelete.disabled = !canUndo;
             btnIsolate.disabled = !hasPlate || itemCount === 0;
+            btnSelectComplexity.disabled = !hasPlate || itemCount === 0;
         }
 
         function selectAll() {
@@ -1325,13 +1389,41 @@
         }
 
         function showAll() {
-            if (hiddenIds.size === 0) return;
+            if (hiddenIds.size === 0 && isolationMode === null) return;
 
             const count = hiddenIds.size;
             hiddenIds.clear();
+            isolationMode = null;
             updateSelection();
 
             showToast(`Showing ${count} block(s)`, 'success');
+        }
+
+        function reapplyIsolationMode() {
+            // Silently reapply the current isolation mode without toast messages
+            if (isolationMode === 'area') {
+                const threshold = parseFloat(areaThreshold.value) || 100;
+                polygons.forEach((poly, idx) => {
+                    const area = calculatePolygonArea(poly.points);
+                    if (area > threshold) {
+                        hiddenIds.add(idx);
+                    } else {
+                        hiddenIds.delete(idx);
+                    }
+                });
+            } else if (isolationMode === 'complexity') {
+                const complexityThresh = parseFloat(complexityThreshold.value) || 10;
+                const areaThresh = parseFloat(areaThreshold.value) || 100;
+                polygons.forEach((poly, idx) => {
+                    const area = calculatePolygonArea(poly.points);
+                    const complexity = calculatePolygonComplexity(poly.points);
+                    if (area <= areaThresh && complexity <= complexityThresh) {
+                        hiddenIds.delete(idx);
+                    } else {
+                        hiddenIds.add(idx);
+                    }
+                });
+            }
         }
 
         function isolateSmall() {
@@ -1352,9 +1444,38 @@
             });
 
             selectedIds.clear();
+            isolationMode = 'area';
             updateSelection();
 
             showToast(`Isolated ${visibleCount} polygons with area ≤ ${threshold} (hid ${hiddenCount})`, 'success');
+        }
+
+        function isolateByComplexity() {
+            const complexityThresh = parseFloat(complexityThreshold.value) || 10;
+            const areaThresh = parseFloat(areaThreshold.value) || 100;
+
+            let hiddenCount = 0;
+            let visibleCount = 0;
+
+            polygons.forEach((poly, idx) => {
+                const area = calculatePolygonArea(poly.points);
+                const complexity = calculatePolygonComplexity(poly.points);
+
+                // Polygon must satisfy both: area ≤ areaThresh AND complexity ≤ complexityThresh
+                if (area <= areaThresh && complexity <= complexityThresh) {
+                    hiddenIds.delete(idx);
+                    visibleCount++;
+                } else {
+                    hiddenIds.add(idx);
+                    hiddenCount++;
+                }
+            });
+
+            selectedIds.clear();
+            isolationMode = 'complexity';
+            updateSelection();
+
+            showToast(`Isolated ${visibleCount} polygons with area ≤ ${areaThresh} and complexity ≤ ${complexityThresh} (hid ${hiddenCount})`, 'success');
         }
 
         function deleteVisible() {
@@ -1654,6 +1775,8 @@
                 // No same-block targets, just remove the selected polygons
                 polygons = unchangedPolygons;
                 selectedIds.clear();
+                hiddenIds.clear();
+                reapplyIsolationMode();
                 hasChanges = true;
                 renderSVG(currentSvgData);
                 renderBlockList();
@@ -1700,6 +1823,7 @@
                     polygons = newPolygons;
                     selectedIds.clear();
                     hiddenIds.clear();  // Reset hidden since indices changed
+                    reapplyIsolationMode();
                     hasChanges = true;
 
                     renderSVG(currentSvgData);
@@ -1888,6 +2012,7 @@
                     }
                     selectedIds.clear();
                     hiddenIds.clear();
+                    isolationMode = null;
                     deletedPolygons = [];
                     deleteHistory = [];
                     switchTab('blocks');
@@ -1898,6 +2023,7 @@
             btnSave.addEventListener('click', saveChanges);
             btnUndelete.addEventListener('click', undoDelete);
             btnIsolate.addEventListener('click', isolateSmall);
+            btnSelectComplexity.addEventListener('click', isolateByComplexity);
 
             backgroundModeSelect.addEventListener('change', () => {
                 backgroundMode = backgroundModeSelect.value;

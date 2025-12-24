@@ -107,6 +107,8 @@ Keyboard shortcuts:
 
 The area threshold input (default 100) filters polygons by SVG area for the Isolate command.
 
+The complexity threshold input (default 10) filters by polygon complexity (area / number of points). The Select button isolates polygons matching both area ≤ threshold AND complexity ≤ threshold.
+
 Alternatively, open `plate.svg` in an SVG editor (Inkscape, Illustrator, etc.) and:
 - Delete incorrect block detections
 - Merge overlapping blocks
