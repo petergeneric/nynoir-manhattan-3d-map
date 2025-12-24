@@ -1570,7 +1570,7 @@
                     isVisible = !isVisible;
                     document.querySelectorAll('.svg-polygon').forEach(poly => {
                         const idx = parseInt(poly.dataset.index);
-                        if (!hiddenIds.has(idx)) {
+                        if (!hiddenIds.has(idx) && !selectedIds.has(idx)) {
                             poly.style.opacity = isVisible ? '' : '0.05';
                         }
                     });
