@@ -296,6 +296,10 @@
             cursor: grabbing;
         }
 
+        #svg-container {
+            position: relative;
+        }
+
         #svg-canvas {
             display: block;
             transform-origin: 0 0;
@@ -591,7 +595,9 @@
 
         <div class="canvas-container">
             <div id="canvas-wrapper">
-                <svg id="svg-canvas"></svg>
+                <div id="svg-container">
+                    <svg id="svg-canvas"></svg>
+                </div>
             </div>
             <div class="loading" id="loading">Select a plate to begin</div>
 
@@ -1758,7 +1764,16 @@
 
         // Zoom controls
         function applyZoom() {
+            const svgWidth = parseInt(svgCanvas.getAttribute('width')) || 1000;
+            const svgHeight = parseInt(svgCanvas.getAttribute('height')) || 1000;
+
             svgCanvas.style.transform = `scale(${zoom})`;
+
+            // Set container size to match scaled SVG so scrollable area is correct
+            const container = document.getElementById('svg-container');
+            container.style.width = `${svgWidth * zoom}px`;
+            container.style.height = `${svgHeight * zoom}px`;
+
             document.getElementById('zoom-level').textContent = `${Math.round(zoom * 100)}%`;
         }
 
@@ -1789,8 +1804,10 @@
         let panStartX, panStartY;
         let scrollStartX, scrollStartY;
 
+        const svgContainer = document.getElementById('svg-container');
+
         canvasWrapper.addEventListener('mousedown', (e) => {
-            if (e.target === canvasWrapper || e.target === svgCanvas || e.target.tagName === 'image') {
+            if (e.target === canvasWrapper || e.target === svgContainer || e.target === svgCanvas || e.target.tagName === 'image') {
                 isPanning = true;
                 panStartX = e.clientX;
                 panStartY = e.clientY;
