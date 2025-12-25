@@ -134,6 +134,7 @@ def parse_segmentation_json(json_path: Path) -> List[PlateEntry]:
     """Parse the segmentation.json file.
 
     Uses JSON5 which tolerates trailing commas and unquoted keys.
+    Skips entries where the SVG file doesn't exist.
     """
     content = json_path.read_text()
     data = json5.loads(content)
@@ -144,6 +145,11 @@ def parse_segmentation_json(json_path: Path) -> List[PlateEntry]:
     for item in data:
         svg_path = (base_dir / item["file"]).resolve()
         metadata_path = (base_dir / item["scale"]).resolve()
+
+        if not svg_path.exists():
+            print(f"Skipping entry: SVG file does not exist: {svg_path}")
+            continue
+
         entries.append(PlateEntry(svg_path=svg_path, metadata_path=metadata_path))
 
     return entries
