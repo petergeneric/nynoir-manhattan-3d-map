@@ -517,6 +517,34 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             font-family: monospace;
         }
 
+        .calibration-row .value.editable {
+            cursor: pointer;
+            padding: 2px 6px;
+            border-radius: 3px;
+            transition: background 0.15s;
+        }
+
+        .calibration-row .value.editable:hover {
+            background: #0f3460;
+        }
+
+        .calibration-row .value-input {
+            width: 80px;
+            background: #0f3460;
+            border: 1px solid #4a8aca;
+            color: #fff;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: monospace;
+            font-size: 13px;
+            text-align: right;
+        }
+
+        .calibration-row .value-input:focus {
+            outline: none;
+            border-color: #6ab0f0;
+        }
+
         .canvas-container {
             flex: 1;
             overflow: hidden;
@@ -679,6 +707,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             display: flex;
             align-items: center;
             justify-content: center;
+            padding: 20px;
         }
 
         .modal-image-container {
@@ -687,8 +716,8 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         }
 
         .modal-image {
-            max-width: 100%;
-            max-height: 100%;
+            max-width: calc(100vw - 40px);
+            max-height: calc(100vh - 100px);  /* Account for header + padding */
             cursor: crosshair;
         }
 
@@ -842,11 +871,11 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 <h3>Current Alignment</h3>
                 <div class="calibration-row">
                     <label>Angle:</label>
-                    <span class="value" id="cal-angle">--</span>
+                    <span class="value editable" id="cal-angle" title="Click to edit">--</span>
                 </div>
                 <div class="calibration-row">
                     <label>Scale:</label>
-                    <span class="value" id="cal-scale">--</span>
+                    <span class="value editable" id="cal-scale" title="Click to edit">--</span>
                 </div>
                 <div class="calibration-row">
                     <label>Position:</label>
@@ -872,8 +901,8 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 
             <div class="help-text" id="help-text">
                 Click a <span style="color: #d4a017;">pending plate</span> to begin alignment.
-                <br><kbd>[</kbd> / <kbd>]</kbd> Scale down/up
-                <br><kbd>Ctrl+S</kbd> Save alignment
+                <br><kbd>[</kbd> / <kbd>]</kbd> Scale &nbsp; <kbd>-</kbd> / <kbd>=</kbd> Rotate
+                <br><kbd>,</kbd> / <kbd>.</kbd> Opacity &nbsp; <kbd>Ctrl+S</kbd> Save
             </div>
         </div>
     </main>
@@ -929,7 +958,8 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             pixelDistance: 0,
             angle: 0,
             scaleFactor: 0,
-            position: {x: 0, y: 0}
+            position: {x: 0, y: 0},
+            opacity: 1.0
         };
         let zoom = 0.5;
         let isDragging = false;
@@ -1166,7 +1196,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 };
                 workflowStep = 6;  // Fine adjust mode
                 unlockCurrentThumbnail();
-                updateHelpText('Drag to adjust position. Press [ or ] to scale. Save when done.');
+                updateHelpText('Drag to adjust. <kbd>[</kbd>/<kbd>]</kbd> Scale <kbd>-</kbd>/<kbd>=</kbd> Rotate <kbd>,</kbd>/<kbd>.</kbd> Opacity');
                 btnSave.disabled = false;
             } else {
                 // Start alignment workflow
@@ -1184,7 +1214,8 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 pixelDistance: 0,
                 angle: 0,
                 scaleFactor: 0,
-                position: {x: 0, y: 0}
+                position: {x: 0, y: 0},
+                opacity: 1.0
             };
             workflowStep = 1;
 
@@ -1536,10 +1567,11 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                         }
                     }
 
-                    // Lock thumbnail
+                    // Lock thumbnail and reset opacity
                     const thumb = document.getElementById(`thumb-${currentPlate.plate_id}`);
                     if (thumb) {
                         thumb.classList.add('locked');
+                        thumb.style.opacity = 1.0;
                     }
 
                     // Update sidebar
@@ -1623,6 +1655,23 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 
             // Save button
             btnSave.addEventListener('click', saveAlignment);
+
+            // Editable calibration values
+            document.getElementById('cal-angle').addEventListener('click', () => {
+                if (workflowStep !== 6) return;
+                makeEditable('cal-angle', calibrationData.angle, (val) => {
+                    calibrationData.angle = parseFloat(val) || 0;
+                    updateCurrentThumbnail();
+                });
+            });
+
+            document.getElementById('cal-scale').addEventListener('click', () => {
+                if (workflowStep !== 6) return;
+                makeEditable('cal-scale', calibrationData.scaleFactor, (val) => {
+                    calibrationData.scaleFactor = Math.max(0.01, parseFloat(val) || 0.1);
+                    updateCurrentThumbnail();
+                });
+            });
 
             // Align Map button
             btnAlignMap.addEventListener('click', startReferenceMapAlignment);
@@ -1717,23 +1766,35 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             document.addEventListener('keydown', (e) => {
                 if (e.target.tagName === 'INPUT') return;
 
+                // Zoom-dependent adjustments: more precise at higher zoom
+                // At zoom 0.5: scale ±5%, angle ±1°
+                // At zoom 1.7: scale ±0.01, angle ±0.1°
+                const scaleStep = Math.max(0.01, 0.05 / zoom);
+                const angleStep = Math.max(0.1, 1.0 / zoom);
+
                 if (e.key === '[' && workflowStep === 6) {
-                    calibrationData.scaleFactor *= 0.95;
+                    calibrationData.scaleFactor = Math.max(0.01, calibrationData.scaleFactor - scaleStep);
                     updateCurrentThumbnail();
                 } else if (e.key === ']' && workflowStep === 6) {
-                    calibrationData.scaleFactor *= 1.05;
+                    calibrationData.scaleFactor += scaleStep;
+                    updateCurrentThumbnail();
+                } else if (e.key === '-' && workflowStep === 6) {
+                    calibrationData.angle -= angleStep;
+                    updateCurrentThumbnail();
+                } else if (e.key === '=' && workflowStep === 6) {
+                    calibrationData.angle += angleStep;
+                    updateCurrentThumbnail();
+                } else if (e.key === ',' && workflowStep === 6) {
+                    calibrationData.opacity = Math.max(0.1, calibrationData.opacity - 0.1);
+                    updateCurrentThumbnail();
+                } else if (e.key === '.' && workflowStep === 6) {
+                    calibrationData.opacity = Math.min(1.0, calibrationData.opacity + 0.1);
                     updateCurrentThumbnail();
                 } else if (e.key === 'Escape') {
                     cancelWorkflow();
                 } else if ((e.ctrlKey || e.metaKey) && e.key === 's') {
                     e.preventDefault();
                     saveAlignment();
-                } else if (e.key === '=' || e.key === '+') {
-                    zoomIn();
-                } else if (e.key === '-') {
-                    zoomOut();
-                } else if (e.key === '0') {
-                    fitToView();
                 }
             });
 
@@ -1752,11 +1813,52 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     scale: calibrationData.scaleFactor,
                     pos: [calibrationData.position.x, calibrationData.position.y]
                 });
+                thumb.style.opacity = calibrationData.opacity;
             }
             showAlignmentInfo({
                 angle: calibrationData.angle,
                 scale: calibrationData.scaleFactor,
                 pos: [calibrationData.position.x, calibrationData.position.y]
+            });
+        }
+
+        function makeEditable(elementId, currentValue, onSave) {
+            const span = document.getElementById(elementId);
+            if (!span || span.querySelector('input')) return;  // Already editing
+
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.className = 'value-input';
+            input.value = typeof currentValue === 'number' ? currentValue.toFixed(4) : currentValue;
+
+            const originalText = span.textContent;
+            span.textContent = '';
+            span.appendChild(input);
+            input.focus();
+            input.select();
+
+            const finishEdit = (save) => {
+                if (save) {
+                    onSave(input.value);
+                }
+                // Restore span display (will be updated by showAlignmentInfo)
+                span.textContent = originalText;
+                showAlignmentInfo({
+                    angle: calibrationData.angle,
+                    scale: calibrationData.scaleFactor,
+                    pos: [calibrationData.position.x, calibrationData.position.y]
+                });
+            };
+
+            input.addEventListener('blur', () => finishEdit(true));
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    input.blur();
+                } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    finishEdit(false);
+                }
             });
         }
 
