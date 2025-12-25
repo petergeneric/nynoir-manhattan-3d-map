@@ -1,4 +1,5 @@
 *.stl
+*.stl.gz
 *.png
 *.jp2
 .DS_Store
