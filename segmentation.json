@@ -1,0 +1,6 @@
+[
+{file:"../segment-anything/output/vol1/p20/segmentation.svg","scale":"../media/v1/p20.metadata.json"},
+{file:"../segment-anything/output/vol1/p21/segmentation.svg","scale":"../media/v1/p21.metadata.json"},
+{file:"../segment-anything/output/vol1/p22/segmentation.svg","scale":"../media/v1/p22.metadata.json"},
+{file:"../segment-anything/output/vol1/p23/segmentation.svg","scale":"../media/v1/p23.metadata.json"},
+]
