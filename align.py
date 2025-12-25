@@ -801,7 +801,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         <div class="canvas-container">
             <div id="canvas-wrapper">
                 <div id="canvas-content">
-                    <img id="reference-map" src="/media/overview/section1.jpeg" alt="Reference Map">
+                    <img id="reference-map" src="/media/overview/section1.jpeg" alt="Reference Map" draggable="false">
                     <div id="thumbnails-layer"></div>
                 </div>
             </div>
@@ -856,7 +856,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
     <script>
         // Constants
         const REFERENCE_SCALE = 600;  // Reference map: 1 inch = 600 feet
-        const THUMBNAIL_SCALE = 0.1;  // Thumbnails are 10% of original
+        const THUMBNAIL_SCALE = 10.0;  // Scale factor for thumbnails (already 10% size)
 
         // State
         let volumes = [];
@@ -1180,8 +1180,8 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             const dy = south.y - north.y;  // Inverted for screen coords
 
             // atan2 gives angle from positive X axis
-            // We want rotation needed to align north-up
-            let angle = Math.atan2(dx, dy) * (180 / Math.PI);
+            // We want rotation needed to align north-up (negate for CSS rotation direction)
+            let angle = -Math.atan2(dx, dy) * (180 / Math.PI);
 
             return angle;
         }
