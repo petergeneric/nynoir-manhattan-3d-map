@@ -8,5 +8,7 @@
 {file:"../segment-anything/output/vol1/p26/segmentation.svg","scale":"../media/v1/p26.metadata.json"},
 {file:"../segment-anything/output/vol1/p27/segmentation.svg","scale":"../media/v1/p27.metadata.json"},
 {file:"../segment-anything/output/vol1/p28/segmentation.svg","scale":"../media/v1/p28.metadata.json"},
-{file:"../segment-anything/output/vol1/p29/segmentation.svg","scale":"../media/v1/p29.metadata.json"}
+{file:"../segment-anything/output/vol1/p29/segmentation.svg","scale":"../media/v1/p29.metadata.json"},
+{file:"../segment-anything/output/vol1/p30/segmentation.svg","scale":"../media/v1/p30.metadata.json"},
+{file:"../segment-anything/output/vol1/p31/segmentation.svg","scale":"../media/v1/p31.metadata.json"}
 ]

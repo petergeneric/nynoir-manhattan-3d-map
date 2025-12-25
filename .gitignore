@@ -4,4 +4,5 @@
 .DS_Store
 *.svg
 __pycache__/
+Makefile.local
 
