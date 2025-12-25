@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NYC Block - 1920s Buildings</title>
+    <title>1920 Manhattan - South</title>
     <style>
         * {
             margin: 0;
@@ -49,8 +49,8 @@
 </head>
 <body>
     <div id="info">
-        <h1>1920s NYC Block</h1>
-        <p>Drag to rotate, scroll to zoom</p>
+        <h1>1920 Manhattan - South</h1>
+        <p>Drag to rotate, scroll to zoom, WASD/arrows to pan</p>
     </div>
     <div id="loading">Loading model...</div>
     <div id="container"></div>
@@ -193,9 +193,87 @@
 
         loadCompressedSTL('multiblock.stl.gz');
 
+        // Keyboard state
+        const keys = {
+            forward: false,
+            backward: false,
+            left: false,
+            right: false
+        };
+
+        // Key event handlers
+        window.addEventListener('keydown', (e) => {
+            switch(e.code) {
+                case 'KeyW':
+                case 'ArrowUp':
+                    keys.forward = true;
+                    break;
+                case 'KeyS':
+                case 'ArrowDown':
+                    keys.backward = true;
+                    break;
+                case 'KeyA':
+                case 'ArrowLeft':
+                    keys.left = true;
+                    break;
+                case 'KeyD':
+                case 'ArrowRight':
+                    keys.right = true;
+                    break;
+            }
+        });
+
+        window.addEventListener('keyup', (e) => {
+            switch(e.code) {
+                case 'KeyW':
+                case 'ArrowUp':
+                    keys.forward = false;
+                    break;
+                case 'KeyS':
+                case 'ArrowDown':
+                    keys.backward = false;
+                    break;
+                case 'KeyA':
+                case 'ArrowLeft':
+                    keys.left = false;
+                    break;
+                case 'KeyD':
+                case 'ArrowRight':
+                    keys.right = false;
+                    break;
+            }
+        });
+
         // Animation loop
         function animate() {
             requestAnimationFrame(animate);
+
+            // Calculate movement speed based on zoom level (distance to target)
+            const distance = camera.position.distanceTo(controls.target);
+            const moveSpeed = distance * 0.01; // 1% of distance per frame
+
+            // Get camera's horizontal forward direction (ignore vertical component)
+            const forward = new THREE.Vector3();
+            camera.getWorldDirection(forward);
+            forward.y = 0;
+            forward.normalize();
+
+            // Get right vector (perpendicular to forward on XZ plane)
+            const right = new THREE.Vector3();
+            right.crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
+
+            // Apply movement to both camera and target (panning)
+            const movement = new THREE.Vector3();
+            if (keys.forward) movement.add(forward.clone().multiplyScalar(moveSpeed));
+            if (keys.backward) movement.add(forward.clone().multiplyScalar(-moveSpeed));
+            if (keys.left) movement.add(right.clone().multiplyScalar(-moveSpeed));
+            if (keys.right) movement.add(right.clone().multiplyScalar(moveSpeed));
+
+            if (movement.length() > 0) {
+                camera.position.add(movement);
+                controls.target.add(movement);
+            }
+
             controls.update();
             renderer.render(scene, camera);
         }
