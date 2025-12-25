@@ -107,12 +107,53 @@
         directionalLight2.position.set(-500, 300, -500);
         scene.add(directionalLight2);
 
-        // Load STL
-        const loader = new STLLoader();
-        loader.load(
-            'multiblock.stl',
-            function (geometry) {
-                document.getElementById('loading').style.display = 'none';
+        // Load and decompress gzipped STL
+        async function loadCompressedSTL(url) {
+            const loadingEl = document.getElementById('loading');
+
+            try {
+                const response = await fetch(url);
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                const contentLength = response.headers.get('content-length');
+                const total = contentLength ? parseInt(contentLength, 10) : 0;
+
+                // Read and track progress
+                const reader = response.body.getReader();
+                const chunks = [];
+                let loaded = 0;
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    chunks.push(value);
+                    loaded += value.length;
+                    if (total) {
+                        const percent = (loaded / total * 100).toFixed(0);
+                        loadingEl.textContent = `Downloading... ${percent}%`;
+                    }
+                }
+
+                // Combine chunks
+                const compressedData = new Uint8Array(loaded);
+                let offset = 0;
+                for (const chunk of chunks) {
+                    compressedData.set(chunk, offset);
+                    offset += chunk.length;
+                }
+
+                // Decompress using DecompressionStream
+                loadingEl.textContent = 'Decompressing...';
+                const ds = new DecompressionStream('gzip');
+                const decompressedStream = new Response(
+                    new Blob([compressedData]).stream().pipeThrough(ds)
+                ).arrayBuffer();
+                const stlData = await decompressedStream;
+
+                // Parse STL
+                loadingEl.style.display = 'none';
+                const loader = new STLLoader();
+                const geometry = loader.parse(stlData);
 
                 // Center the geometry
                 geometry.computeBoundingBox();
@@ -143,16 +184,14 @@
                 camera.position.set(maxDim, maxDim * 0.8, maxDim);
                 controls.target.set(0, size.y / 4, 0);
                 controls.update();
-            },
-            function (xhr) {
-                const percent = (xhr.loaded / xhr.total * 100).toFixed(0);
-                document.getElementById('loading').textContent = `Loading... ${percent}%`;
-            },
-            function (error) {
-                document.getElementById('loading').textContent = 'Error loading model';
+
+            } catch (error) {
+                loadingEl.textContent = 'Error loading model';
                 console.error('Error loading STL:', error);
             }
-        );
+        }
+
+        loadCompressedSTL('multiblock.stl.gz');
 
         // Animation loop
         function animate() {
