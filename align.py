@@ -252,6 +252,37 @@ def serve_overview(filename):
     return send_from_directory(OVERVIEW_DIR, filename)
 
 
+@app.route('/api/reference-map')
+def api_get_reference_map():
+    """Get reference map alignment metadata."""
+    json_path = OVERVIEW_DIR / "section1.metadata.json"
+    if json_path.exists():
+        try:
+            with open(json_path) as f:
+                data = json.load(f)
+                return jsonify({"has_alignment": True, "angle": data.get("angle", 0)})
+        except Exception as e:
+            print(f"Error reading reference map metadata: {e}")
+    return jsonify({"has_alignment": False})
+
+
+@app.route('/api/reference-map/save', methods=['POST'])
+def api_save_reference_map():
+    """Save reference map alignment metadata."""
+    data = request.json
+
+    if 'angle' not in data:
+        return jsonify({"error": "Missing angle field"}), 400
+
+    json_path = OVERVIEW_DIR / "section1.metadata.json"
+    try:
+        with open(json_path, 'w') as f:
+            json.dump({"angle": data['angle']}, f, indent=2)
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # HTML Template (embedded)
 HTML_TEMPLATE = '''<!DOCTYPE html>
 <html lang="en">
@@ -352,6 +383,29 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             font-size: 14px;
             font-weight: 500;
             color: #e94560;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .align-map-btn {
+            background: #d4a017;
+            color: #000;
+            border: none;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+
+        .align-map-btn:hover {
+            background: #e9b82a;
+        }
+
+        .align-map-btn.aligned {
+            background: #0a8754;
+            color: #fff;
         }
 
         .volume-list {
@@ -779,7 +833,10 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 
     <main>
         <div class="sidebar">
-            <div class="sidebar-header">Volumes & Plates</div>
+            <div class="sidebar-header">
+                Volumes & Plates
+                <button id="btn-align-map" class="align-map-btn" title="Align Reference Map">Align Map</button>
+            </div>
             <div class="volume-list" id="volume-list"></div>
             <div class="calibration-panel" id="calibration-panel" style="display: none;">
                 <h3>Current Alignment</h3>
@@ -861,7 +918,9 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         // State
         let volumes = [];
         let currentPlate = null;
-        let workflowStep = 0;  // 0=idle, 1-6=alignment steps
+        let workflowStep = 0;  // 0=idle, 1-6=plate alignment, 10-11=reference map alignment
+        let referenceMapAngle = 0;
+        let referenceMapAligned = false;
         let calibrationData = {
             anglePoints: [],      // [{x, y}, {x, y}] south->north
             scalePoints: [],      // [{x, y}, {x, y}] for distance
@@ -887,6 +946,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         const statusEl = document.getElementById('status');
         const helpText = document.getElementById('help-text');
         const calibrationPanel = document.getElementById('calibration-panel');
+        const btnAlignMap = document.getElementById('btn-align-map');
 
         // Modal elements
         const modal = document.getElementById('modal');
@@ -906,9 +966,82 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 
         // Initialize
         async function init() {
+            await loadReferenceMapAlignment();
             await loadVolumes();
             setupEventListeners();
             fitToView();
+        }
+
+        async function loadReferenceMapAlignment() {
+            try {
+                const response = await fetch('/api/reference-map');
+                const data = await response.json();
+                if (data.has_alignment) {
+                    referenceMapAngle = data.angle;
+                    referenceMapAligned = true;
+                    applyReferenceMapRotation();
+                    updateAlignMapButton();
+                } else {
+                    // Prompt user to align reference map
+                    referenceMapAligned = false;
+                    showToast('Reference map needs alignment - click "Align Map" in sidebar', 'warning');
+                }
+            } catch (error) {
+                console.error('Failed to load reference map alignment:', error);
+            }
+        }
+
+        function updateAlignMapButton() {
+            if (referenceMapAligned) {
+                btnAlignMap.classList.add('aligned');
+                btnAlignMap.textContent = 'Map Aligned';
+            } else {
+                btnAlignMap.classList.remove('aligned');
+                btnAlignMap.textContent = 'Align Map';
+            }
+        }
+
+        function applyReferenceMapRotation() {
+            if (referenceMapAngle !== 0) {
+                referenceMap.style.transformOrigin = 'center center';
+                referenceMap.style.transform = `rotate(${referenceMapAngle}deg)`;
+            }
+        }
+
+        function startReferenceMapAlignment() {
+            workflowStep = 10;  // Reference map alignment mode
+            calibrationData.anglePoints = [];
+
+            // Show modal with reference map image
+            modalTitle.textContent = 'Align Reference Map';
+            modalImage.src = '/media/overview/section1.jpeg';
+            modal.classList.add('active');
+
+            stepIndicator.textContent = 'Step 1 of 2';
+            modalInstructions.textContent = 'Click the SOUTH point on the compass';
+            statusEl.textContent = 'Aligning reference map...';
+        }
+
+        async function saveReferenceMapAlignment() {
+            try {
+                const response = await fetch('/api/reference-map/save', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ angle: referenceMapAngle })
+                });
+
+                const result = await response.json();
+                if (result.success) {
+                    referenceMapAligned = true;
+                    applyReferenceMapRotation();
+                    updateAlignMapButton();
+                    showToast('Reference map alignment saved', 'success');
+                } else {
+                    showToast('Failed to save: ' + result.error, 'error');
+                }
+            } catch (error) {
+                showToast('Failed to save: ' + error.message, 'error');
+            }
         }
 
         async function loadVolumes() {
@@ -1088,7 +1221,8 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         }
 
         function handleModalClick(e) {
-            if (workflowStep < 1 || workflowStep > 4) return;
+            // Handle both plate alignment (1-4) and reference map alignment (10-11)
+            if (!((workflowStep >= 1 && workflowStep <= 4) || (workflowStep >= 10 && workflowStep <= 11))) return;
 
             const rect = modalImage.getBoundingClientRect();
             const x = e.clientX - rect.left;
@@ -1099,14 +1233,14 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             const imgY = (y / rect.height) * modalImage.naturalHeight;
 
             switch (workflowStep) {
-                case 1:  // South point
+                case 1:  // South point (plate)
                     calibrationData.anglePoints[0] = {x: imgX, y: imgY};
                     addMarker(x, y, 'S', rect);
                     workflowStep = 2;
                     updateModalStep();
                     break;
 
-                case 2:  // North point
+                case 2:  // North point (plate)
                     calibrationData.anglePoints[1] = {x: imgX, y: imgY};
                     addMarker(x, y, 'N', rect);
                     drawLine(calibrationData.anglePoints[0], calibrationData.anglePoints[1], rect);
@@ -1135,6 +1269,30 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     );
                     // Show input panel for distance/scale values
                     showInputPanel();
+                    break;
+
+                case 10:  // South point (reference map)
+                    calibrationData.anglePoints[0] = {x: imgX, y: imgY};
+                    addMarker(x, y, 'S', rect);
+                    workflowStep = 11;
+                    stepIndicator.textContent = 'Step 2 of 2';
+                    modalInstructions.textContent = 'Click the NORTH point on the compass';
+                    break;
+
+                case 11:  // North point (reference map)
+                    calibrationData.anglePoints[1] = {x: imgX, y: imgY};
+                    addMarker(x, y, 'N', rect);
+                    drawLine(calibrationData.anglePoints[0], calibrationData.anglePoints[1], rect);
+                    referenceMapAngle = calculateAngle(
+                        calibrationData.anglePoints[0],
+                        calibrationData.anglePoints[1]
+                    );
+                    // Close modal and save
+                    modal.classList.remove('active');
+                    clearMarkers();
+                    saveReferenceMapAlignment();
+                    workflowStep = 0;
+                    statusEl.textContent = 'Select a plate to align';
                     break;
             }
         }
@@ -1465,6 +1623,9 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 
             // Save button
             btnSave.addEventListener('click', saveAlignment);
+
+            // Align Map button
+            btnAlignMap.addEventListener('click', startReferenceMapAlignment);
 
             // Modal
             modalImage.addEventListener('click', handleModalClick);
