@@ -73,6 +73,42 @@ class BlockData:
     translate_y: int
     polygons: List[PolygonData] = field(default_factory=list)
 
+    def filter_outline(self) -> 'BlockData':
+        """Return a new BlockData with the largest polygon (block outline) removed.
+
+        The block outline is assumed to be the polygon with the largest area,
+        which typically encompasses all the building polygons within the block.
+        """
+        if len(self.polygons) <= 1:
+            return self  # Can't filter if only one polygon
+
+        # Calculate area for each polygon
+        def polygon_area(poly: PolygonData) -> float:
+            points = poly.points
+            n = len(points)
+            if n < 3:
+                return 0
+            area = 0
+            for i in range(n):
+                j = (i + 1) % n
+                area += points[i][0] * points[j][1]
+                area -= points[j][0] * points[i][1]
+            return abs(area) / 2
+
+        # Find the largest polygon (the outline)
+        areas = [(i, polygon_area(p)) for i, p in enumerate(self.polygons)]
+        max_idx = max(areas, key=lambda x: x[1])[0]
+
+        # Create new BlockData without the largest polygon
+        filtered_polygons = [p for i, p in enumerate(self.polygons) if i != max_idx]
+
+        return BlockData(
+            block_id=self.block_id,
+            translate_x=self.translate_x,
+            translate_y=self.translate_y,
+            polygons=filtered_polygons
+        )
+
 
 @dataclass
 class PlateData:
@@ -264,7 +300,8 @@ def transform_point(
     x: float, y: float,
     plate_center_x: float, plate_center_y: float,
     angle_deg: float, scale: float,
-    final_pos_x: float, final_pos_y: float
+    final_pos_x: float, final_pos_y: float,
+    output_scale: float = 1.0
 ) -> Tuple[float, float]:
     """Transform a single point using plate metadata.
 
@@ -272,11 +309,17 @@ def transform_point(
     are 10% of the original plate size. For full-size plate coordinates,
     we apply the THUMBNAIL_SCALE_CORRECTION.
 
+    Args:
+        output_scale: Factor to scale the final output coordinates.
+                     Use 1/(reference_scale * THUMBNAIL_SCALE_CORRECTION) to
+                     preserve original plate coordinate scale.
+
     Transformation order (matches CSS transform in align.py):
     1. Translate point relative to plate center (subtract center)
-    2. Apply effective scale (scale * THUMBNAIL_SCALE_CORRECTION for full-size coords)
+    2. Apply effective scale (scale * THUMBNAIL_SCALE_CORRECTION)
     3. Rotate around origin
     4. Translate to final position
+    5. Apply output scale to preserve original coordinate magnitudes
     """
     # Step 1: Move to origin (plate center becomes 0,0)
     px = x - plate_center_x
@@ -296,9 +339,13 @@ def transform_point(
     rx = px * cos_a - py * sin_a
     ry = px * sin_a + py * cos_a
 
-    # Step 4: Translate to final position
+    # Step 4: Translate to final position (in thumbnail-aligned space)
     fx = rx + final_pos_x
     fy = ry + final_pos_y
+
+    # Step 5: Scale output to preserve original coordinate magnitudes
+    fx *= output_scale
+    fy *= output_scale
 
     return (fx, fy)
 
@@ -309,12 +356,16 @@ def transform_polygon(
     block_translate_y: int,
     plate_width: int,
     plate_height: int,
-    metadata: PlateMetadata
+    metadata: PlateMetadata,
+    output_scale: float = 1.0
 ) -> List[Tuple[float, float]]:
     """Transform all points of a polygon.
 
     First converts from local block coords to plate coords,
     then applies the plate transformation.
+
+    Args:
+        output_scale: Factor to scale output coordinates to preserve original magnitudes.
     """
     plate_center_x = plate_width / 2.0
     plate_center_y = plate_height / 2.0
@@ -330,7 +381,8 @@ def transform_polygon(
             plate_x, plate_y,
             plate_center_x, plate_center_y,
             metadata.angle, metadata.scale,
-            metadata.pos_x, metadata.pos_y
+            metadata.pos_x, metadata.pos_y,
+            output_scale
         )
         transformed.append((tx, ty))
 
@@ -338,9 +390,18 @@ def transform_polygon(
 
 
 def combine_plates(
-    entries: List[PlateEntry]
+    entries: List[PlateEntry],
+    skip_outlines: bool = False
 ) -> Tuple[List[CombinedPolygon], Tuple[float, float, float, float]]:
     """Process all plates and return combined polygons with bounding box.
+
+    All plates are scaled relative to the first plate's scale factor to ensure
+    consistent polygon areas for downstream filtering thresholds.
+
+    Args:
+        entries: List of plate entries to process
+        skip_outlines: If True, filter out the largest polygon in each block
+                       (assumed to be the block outline)
 
     Returns:
         (list of CombinedPolygon, (min_x, min_y, max_x, max_y))
@@ -348,6 +409,10 @@ def combine_plates(
     all_polygons: List[CombinedPolygon] = []
     all_x: List[float] = []
     all_y: List[float] = []
+
+    # Reference scale from the first valid plate (for output scaling)
+    reference_scale: Optional[float] = None
+    output_scale: float = 1.0
 
     for entry in entries:
         # Check files exist
@@ -362,21 +427,39 @@ def combine_plates(
         plate_data = parse_segmentation_svg(entry.svg_path)
         metadata = load_metadata(entry.metadata_path)
 
+        # Use first plate's scale to calculate output scaling
+        # This preserves original plate coordinate magnitudes for consistent area filtering
+        if reference_scale is None:
+            reference_scale = metadata.scale
+            # Scale output back up to original plate coordinates
+            # effective_scale = scale * 0.1 shrinks to ~14%, so we multiply by 1/(ref*0.1) to undo
+            output_scale = 1.0 / (reference_scale * THUMBNAIL_SCALE_CORRECTION)
+            print(f"Using {plate_data.plate_id} scale ({metadata.scale:.4f}) as reference")
+            print(f"Output scale factor: {output_scale:.4f} (preserves original coordinate magnitudes)")
+
         print(f"Processing {plate_data.plate_id}: {len(plate_data.blocks)} blocks, "
               f"angle={metadata.angle:.1f}, scale={metadata.scale:.3f}, "
               f"pos=({metadata.pos_x:.0f}, {metadata.pos_y:.0f})")
 
         polygon_count = 0
+        outlines_skipped = 0
         for block_id, block in plate_data.blocks.items():
+            # Optionally filter out block outline (largest polygon)
+            if skip_outlines:
+                filtered_block = block.filter_outline()
+                outlines_skipped += len(block.polygons) - len(filtered_block.polygons)
+                block = filtered_block
+
             for polygon in block.polygons:
-                # Transform points
+                # Transform points (with output scaling to preserve original coordinate magnitudes)
                 transformed_points = transform_polygon(
                     polygon.points,
                     block.translate_x,
                     block.translate_y,
                     plate_data.width,
                     plate_data.height,
-                    metadata
+                    metadata,
+                    output_scale
                 )
 
                 # Track bounding box
@@ -394,7 +477,10 @@ def combine_plates(
                 ))
                 polygon_count += 1
 
-        print(f"  -> {polygon_count} polygons transformed")
+        if skip_outlines and outlines_skipped > 0:
+            print(f"  -> {polygon_count} polygons transformed ({outlines_skipped} block outlines skipped)")
+        else:
+            print(f"  -> {polygon_count} polygons transformed")
 
     if not all_x:
         return all_polygons, (0, 0, 100, 100)
@@ -619,6 +705,11 @@ def main():
         type=Path,
         help="Background image (JP2/JPEG/PNG) to include with xlink:href"
     )
+    parser.add_argument(
+        "--skip-outlines",
+        action="store_true",
+        help="Skip block outline polygons (the largest polygon in each block)"
+    )
     args = parser.parse_args()
 
     # Validate input file
@@ -640,7 +731,7 @@ def main():
     print(f"Found {len(entries)} plates to combine\n")
 
     # Process and combine
-    polygons, bbox = combine_plates(entries)
+    polygons, bbox = combine_plates(entries, skip_outlines=args.skip_outlines)
 
     if not polygons:
         print("Error: No polygons found to combine")

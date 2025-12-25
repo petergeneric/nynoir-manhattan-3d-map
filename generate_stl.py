@@ -1109,7 +1109,7 @@ Examples:
 
         print(f"Running combine.py on {manifest_path}...")
         result = subprocess.run(
-            ["python3", str(combine_script), str(manifest_path), "-o", str(combined_svg)],
+            ["python3", str(combine_script), str(manifest_path), "-o", str(combined_svg), "--skip-outlines"],
             capture_output=True,
             text=True,
             cwd=manifest_path.parent  # Run from manifest directory for relative paths
