@@ -5,6 +5,7 @@ description = "Generate STL files by extruding SVG building shapes"
 requires-python = ">=3.10"
 dependencies = [
     "fast-simplification",
+    "json5",
     "networkx",
     "numpy-stl",
     "pillow",

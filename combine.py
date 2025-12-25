@@ -12,7 +12,7 @@ Usage:
 
 import argparse
 import base64
-import json
+import json5
 import math
 import mimetypes
 import os
@@ -133,20 +133,10 @@ class CombinedPolygon:
 def parse_segmentation_json(json_path: Path) -> List[PlateEntry]:
     """Parse the segmentation.json file.
 
-    Handles non-standard JSON with unquoted keys (JavaScript object notation).
+    Uses JSON5 which tolerates trailing commas and unquoted keys.
     """
     content = json_path.read_text()
-
-    # Try standard JSON first
-    try:
-        data = json.loads(content)
-    except json.JSONDecodeError:
-        # Fix unquoted keys: {file:"..." -> {"file":"..."
-        fixed = re.sub(r'\{(\s*)(\w+):', r'{\1"\2":', content)
-        fixed = re.sub(r',(\s*)(\w+):', r',\1"\2":', fixed)
-        # Remove trailing commas before ] or }
-        fixed = re.sub(r',(\s*)([\]\}])', r'\1\2', fixed)
-        data = json.loads(fixed)
+    data = json5.loads(content)
 
     entries = []
     base_dir = json_path.parent
@@ -236,7 +226,7 @@ def parse_segmentation_svg(svg_path: Path) -> PlateData:
 def load_metadata(metadata_path: Path) -> PlateMetadata:
     """Load transformation metadata from a .metadata.json file."""
     with open(metadata_path) as f:
-        data = json.load(f)
+        data = json5.load(f)
 
     return PlateMetadata(
         angle=data["angle"],
@@ -282,7 +272,7 @@ def load_background_image(image_path: Path) -> Optional[BackgroundImage]:
     if metadata_path.exists():
         try:
             with open(metadata_path) as f:
-                data = json.load(f)
+                data = json5.load(f)
                 angle = data.get("angle", 0.0)
         except Exception as e:
             print(f"Warning: Could not read metadata {metadata_path}: {e}")
