@@ -13,6 +13,8 @@ Block context is tracked for each shape to enable context-aware height generatio
 import re
 import random
 import argparse
+import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
@@ -913,6 +915,9 @@ Examples:
 
   # Process single block SVG
   uv run python generate_stl.py --block ../segment-anything/output/vol1/p1/b-0001.svg
+
+  # Manifest mode (combines multiple plates then extrudes)
+  uv run python generate_stl.py --manifest segmentation.json
         """
     )
 
@@ -932,6 +937,11 @@ Examples:
         "--block",
         type=Path,
         help="Path to single block SVG file"
+    )
+    input_group.add_argument(
+        "--manifest",
+        type=Path,
+        help="Path to segmentation.json manifest file (runs combine.py first)"
     )
 
     parser.add_argument(
@@ -1029,6 +1039,48 @@ Examples:
         stl_mesh = create_stl_mesh(all_triangles)
         stl_mesh.save(str(output_path))
         print(f"Wrote STL file to: {output_path}")
+
+    elif args.manifest:
+        manifest_path = args.manifest
+        if not manifest_path.exists():
+            print(f"Error: Manifest file not found: {manifest_path}")
+            return 1
+
+        # Create temp file for combined SVG
+        tmp_dir = Path("/tmp/claude")
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        combined_svg = tmp_dir / f"combined_{manifest_path.stem}.svg"
+
+        # Run combine.py to create the combined SVG
+        combine_script = Path(__file__).parent / "combine.py"
+        if not combine_script.exists():
+            print(f"Error: combine.py not found at {combine_script}")
+            return 1
+
+        print(f"Running combine.py on {manifest_path}...")
+        result = subprocess.run(
+            ["python3", str(combine_script), str(manifest_path), "-o", str(combined_svg)],
+            capture_output=True,
+            text=True,
+            cwd=manifest_path.parent  # Run from manifest directory for relative paths
+        )
+
+        if result.returncode != 0:
+            print(f"Error running combine.py:")
+            print(result.stderr)
+            return 1
+
+        print(result.stdout)
+
+        if not combined_svg.exists():
+            print(f"Error: Combined SVG was not created at {combined_svg}")
+            return 1
+
+        # Now process the combined SVG as a segmentation file
+        output_path = args.output or manifest_path.with_suffix(".stl")
+        print(f"\nExtruding combined SVG to {output_path}...")
+        process_segmentation(combined_svg, output_path, use_plate_coords=not args.local_coords,
+                           config=height_config, simplify_tolerance=args.simplify)
 
     elif args.svg:
         svg_path = args.svg

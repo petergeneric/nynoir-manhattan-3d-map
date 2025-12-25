@@ -3,4 +3,8 @@
 {file:"../segment-anything/output/vol1/p21/segmentation.svg","scale":"../media/v1/p21.metadata.json"},
 {file:"../segment-anything/output/vol1/p22/segmentation.svg","scale":"../media/v1/p22.metadata.json"},
 {file:"../segment-anything/output/vol1/p23/segmentation.svg","scale":"../media/v1/p23.metadata.json"},
+{file:"../segment-anything/output/vol1/p24/segmentation.svg","scale":"../media/v1/p24.metadata.json"},
+{file:"../segment-anything/output/vol1/p25/segmentation.svg","scale":"../media/v1/p25.metadata.json"},
+{file:"../segment-anything/output/vol1/p26/segmentation.svg","scale":"../media/v1/p26.metadata.json"},
+{file:"../segment-anything/output/vol1/p27/segmentation.svg","scale":"../media/v1/p27.metadata.json"}
 ]
