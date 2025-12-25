@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
 import numpy as np
+import trimesh
 from shapely.geometry import Polygon as ShapelyPolygon
 from stl import mesh
 
@@ -800,6 +801,57 @@ def create_stl_mesh(triangles):
 
     return stl_mesh
 
+
+def optimize_mesh(stl_mesh: mesh.Mesh, target_reduction: float = 0.5) -> mesh.Mesh:
+    """Optimize an STL mesh by repairing and decimating.
+
+    Args:
+        stl_mesh: Input numpy-stl mesh object
+        target_reduction: Target reduction ratio (0.5 = reduce to 50% of faces)
+
+    Returns:
+        Optimized numpy-stl mesh object
+    """
+    original_faces = len(stl_mesh.vectors)
+
+    # Convert numpy-stl mesh to trimesh
+    # numpy-stl stores vertices per-face, so we need to reshape
+    vertices = stl_mesh.vectors.reshape(-1, 3)
+    faces = np.arange(len(vertices)).reshape(-1, 3)
+
+    tri_mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+
+    # Merge duplicate vertices (critical for proper mesh topology)
+    tri_mesh.merge_vertices()
+
+    # Repair mesh issues
+    tri_mesh.fix_normals()
+    tri_mesh.fill_holes()
+    # Remove degenerate and duplicate faces
+    tri_mesh.update_faces(tri_mesh.nondegenerate_faces())
+    tri_mesh.update_faces(tri_mesh.unique_faces())
+
+    # Decimate to reduce face count
+    if target_reduction < 1.0 and len(tri_mesh.faces) > 4:
+        # Use percent_reduction (how much to remove, not keep)
+        # If target_reduction is 0.5 (keep 50%), we want to remove 50%
+        percent_to_remove = 1.0 - target_reduction
+        tri_mesh = tri_mesh.simplify_quadric_decimation(
+            percent=percent_to_remove
+        )
+
+    # Convert back to numpy-stl format
+    optimized = mesh.Mesh(np.zeros(len(tri_mesh.faces), dtype=mesh.Mesh.dtype))
+    for i, face in enumerate(tri_mesh.faces):
+        for j in range(3):
+            optimized.vectors[i][j] = tri_mesh.vertices[face[j]]
+
+    final_faces = len(optimized.vectors)
+    reduction_pct = (1 - final_faces / original_faces) * 100
+    print(f"Mesh optimization: {original_faces} → {final_faces} faces ({reduction_pct:.1f}% reduction)")
+
+    return optimized
+
 def get_height_for_shape(shape: Shape, seg_data: Optional[SegmentationData] = None,
                          config: Optional[HeightConfig] = None) -> Optional[float]:
     """Determine extrusion height for a shape based on elevation rules.
@@ -857,7 +909,8 @@ def get_height_for_shape(shape: Shape, seg_data: Optional[SegmentationData] = No
 
 
 def process_legacy_svg(svg_path: Path, output_path: Path,
-                       simplify_tolerance: float = DEFAULT_SIMPLIFY_TOLERANCE) -> None:
+                       simplify_tolerance: float = DEFAULT_SIMPLIFY_TOLERANCE,
+                       optimize: bool = True, decimate_ratio: float = 0.5) -> None:
     """Process legacy SVG with <path> elements."""
     with open(svg_path, 'r') as f:
         svg_content = f.read()
@@ -887,13 +940,16 @@ def process_legacy_svg(svg_path: Path, output_path: Path,
     print(f"Total triangles: {len(all_triangles)}")
 
     stl_mesh = create_stl_mesh(all_triangles)
+    if optimize:
+        stl_mesh = optimize_mesh(stl_mesh, decimate_ratio)
     stl_mesh.save(str(output_path))
     print(f"Wrote STL file to: {output_path}")
 
 
 def process_segmentation(seg_path: Path, output_path: Path, use_plate_coords: bool = True,
                          config: Optional[HeightConfig] = None,
-                         simplify_tolerance: float = DEFAULT_SIMPLIFY_TOLERANCE) -> None:
+                         simplify_tolerance: float = DEFAULT_SIMPLIFY_TOLERANCE,
+                         optimize: bool = True, decimate_ratio: float = 0.5) -> None:
     """Process segmentation files from segment-anything.
 
     Args:
@@ -902,6 +958,8 @@ def process_segmentation(seg_path: Path, output_path: Path, use_plate_coords: bo
         use_plate_coords: If True, place shapes in plate coordinates; if False, use local block coords
         config: Optional height configuration (min/max stories)
         simplify_tolerance: Tolerance for polygon simplification (0 to disable)
+        optimize: If True, run mesh repair and decimation
+        decimate_ratio: Target ratio for decimation (0.5 = keep 50% of faces)
     """
     if seg_path.is_file():
         seg_data = parse_segmentation_svg(seg_path, simplify_tolerance)
@@ -947,6 +1005,8 @@ def process_segmentation(seg_path: Path, output_path: Path, use_plate_coords: bo
     print(f"Total triangles: {len(all_triangles)}")
 
     stl_mesh = create_stl_mesh(all_triangles)
+    if optimize:
+        stl_mesh = optimize_mesh(stl_mesh, decimate_ratio)
     stl_mesh.save(str(output_path))
     print(f"Wrote STL file to: {output_path}")
 
@@ -1023,6 +1083,18 @@ Examples:
         metavar="TOLERANCE",
         help=f"Polygon simplification tolerance in pixels (default: {DEFAULT_SIMPLIFY_TOLERANCE}, 0 to disable)"
     )
+    parser.add_argument(
+        "--no-optimize",
+        action="store_true",
+        help="Disable mesh optimization (repair and decimation are enabled by default)"
+    )
+    parser.add_argument(
+        "--decimate",
+        type=float,
+        default=0.5,
+        metavar="RATIO",
+        help="Decimation target ratio (default: 0.5 = keep 50%% of faces, 1.0 to skip decimation)"
+    )
 
     args = parser.parse_args()
 
@@ -1043,7 +1115,8 @@ Examples:
         else:
             output_path = args.output or (seg_path / "extruded.stl")
         process_segmentation(seg_path, output_path, use_plate_coords=not args.local_coords,
-                           config=height_config, simplify_tolerance=args.simplify)
+                           config=height_config, simplify_tolerance=args.simplify,
+                           optimize=not args.no_optimize, decimate_ratio=args.decimate)
 
     elif args.block:
         block_path = args.block
@@ -1087,6 +1160,8 @@ Examples:
         print(f"Total triangles: {len(all_triangles)}")
 
         stl_mesh = create_stl_mesh(all_triangles)
+        if not args.no_optimize:
+            stl_mesh = optimize_mesh(stl_mesh, args.decimate)
         stl_mesh.save(str(output_path))
         print(f"Wrote STL file to: {output_path}")
 
@@ -1166,6 +1241,8 @@ Examples:
         print(f"Total triangles: {len(all_triangles)}")
 
         stl_mesh = create_stl_mesh(all_triangles)
+        if not args.no_optimize:
+            stl_mesh = optimize_mesh(stl_mesh, args.decimate)
         stl_mesh.save(str(output_path))
         print(f"Wrote STL file to: {output_path}")
 
@@ -1175,7 +1252,8 @@ Examples:
             print(f"Error: File not found: {svg_path}")
             return 1
         output_path = args.output or svg_path.with_suffix(".stl")
-        process_legacy_svg(svg_path, output_path, args.simplify)
+        process_legacy_svg(svg_path, output_path, args.simplify,
+                          optimize=not args.no_optimize, decimate_ratio=args.decimate)
 
     else:
         # Default: use legacy mode with default input file
@@ -1187,7 +1265,8 @@ Examples:
             print(f"\nNote: Default input file not found: {svg_path}")
             return 1
 
-        process_legacy_svg(svg_path, output_path, args.simplify)
+        process_legacy_svg(svg_path, output_path, args.simplify,
+                          optimize=not args.no_optimize, decimate_ratio=args.decimate)
 
     return 0
 

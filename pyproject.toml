@@ -4,9 +4,13 @@ version = "0.1.0"
 description = "Generate STL files by extruding SVG building shapes"
 requires-python = ">=3.10"
 dependencies = [
+    "fast-simplification",
+    "networkx",
     "numpy-stl",
     "pillow",
+    "scipy",
     "shapely>=2.1.2",
+    "trimesh",
 ]
 
 [project.scripts]
