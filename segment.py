@@ -121,6 +121,11 @@ class PlateSegmentation:
     image_width: int
     image_height: int
     blocks: List[Block]
+    # Optional alignment fields (from align.py, copied to segmentation.svg)
+    angle: Optional[float] = None
+    scale: Optional[float] = None
+    pos_x: Optional[float] = None
+    pos_y: Optional[float] = None
 
 
 @dataclass
@@ -141,6 +146,11 @@ class PlateMetadata:
     plate_id: str
     image_width: int
     image_height: int
+    # Optional alignment fields (from align.py)
+    angle: Optional[float] = None
+    scale: Optional[float] = None
+    pos_x: Optional[float] = None
+    pos_y: Optional[float] = None
 
 
 def bbox_from_polygon_points(points: List[Tuple[int, int]]) -> BoundingBox:
@@ -203,12 +213,22 @@ def parse_plate_svg(svg_path: Path) -> Tuple[PlateMetadata, List[Block]]:
         # Resolve relative path from working directory
         jp2_path = Path.cwd() / jp2_path
 
+    # Read optional alignment fields (from align.py)
+    angle_elem = source_elem.find("atlas:angle", ns)
+    scale_elem = source_elem.find("atlas:scale", ns)
+    pos_x_elem = source_elem.find("atlas:pos-x", ns)
+    pos_y_elem = source_elem.find("atlas:pos-y", ns)
+
     metadata = PlateMetadata(
         jp2_path=jp2_path,
         volume=volume_elem.text,
         plate_id=plate_id_elem.text,
         image_width=int(width_elem.text),
         image_height=int(height_elem.text),
+        angle=float(angle_elem.text) if angle_elem is not None and angle_elem.text else None,
+        scale=float(scale_elem.text) if scale_elem is not None and scale_elem.text else None,
+        pos_x=float(pos_x_elem.text) if pos_x_elem is not None and pos_x_elem.text else None,
+        pos_y=float(pos_y_elem.text) if pos_y_elem is not None and pos_y_elem.text else None,
     )
 
     # Extract blocks from polygons with data-block-id attribute
@@ -899,9 +919,32 @@ def generate_combined_svg(plate: PlateSegmentation, output_path: Path) -> None:
         '  <!-- Combined segmentation view -->',
         '  <!-- Block content inlined for compatibility -->',
         '',
+        '  <!-- Metadata (copied from plate.svg) -->',
+        '  <metadata>',
+        f'    <atlas:source xmlns:atlas="{ATLAS_NAMESPACE}">',
+        f'      <atlas:volume>{plate.volume}</atlas:volume>',
+        f'      <atlas:plate-id>{plate.plate_id}</atlas:plate-id>',
+        f'      <atlas:image-width>{plate.image_width}</atlas:image-width>',
+        f'      <atlas:image-height>{plate.image_height}</atlas:image-height>',
+    ]
+
+    # Add optional alignment fields if present
+    if plate.angle is not None:
+        svg_parts.append(f'      <atlas:angle>{plate.angle}</atlas:angle>')
+    if plate.scale is not None:
+        svg_parts.append(f'      <atlas:scale>{plate.scale}</atlas:scale>')
+    if plate.pos_x is not None:
+        svg_parts.append(f'      <atlas:pos-x>{plate.pos_x}</atlas:pos-x>')
+    if plate.pos_y is not None:
+        svg_parts.append(f'      <atlas:pos-y>{plate.pos_y}</atlas:pos-y>')
+
+    svg_parts.extend([
+        '    </atlas:source>',
+        '  </metadata>',
+        '',
         '  <!-- Block outline layer (from plate.svg) -->',
         '  <g id="block-outlines" opacity="0.3">',
-    ]
+    ])
 
     # Add block outlines as a base layer
     for block in plate.blocks:
@@ -1098,7 +1141,11 @@ def process_stage2(svg_path: Path, sam_model) -> None:
         plate_id=metadata.plate_id,
         image_width=metadata.image_width,
         image_height=metadata.image_height,
-        blocks=renumbered_blocks
+        blocks=renumbered_blocks,
+        angle=metadata.angle,
+        scale=metadata.scale,
+        pos_x=metadata.pos_x,
+        pos_y=metadata.pos_y,
     )
 
     # Process each block through SAM
@@ -1336,7 +1383,11 @@ def process_combine(svg_path: Path, apply_culling: bool = True) -> None:
         plate_id=metadata.plate_id,
         image_width=metadata.image_width,
         image_height=metadata.image_height,
-        blocks=renumbered_blocks
+        blocks=renumbered_blocks,
+        angle=metadata.angle,
+        scale=metadata.scale,
+        pos_x=metadata.pos_x,
+        pos_y=metadata.pos_y,
     )
 
     # Generate combined SVG
