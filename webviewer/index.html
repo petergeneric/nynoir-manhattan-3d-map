@@ -107,16 +107,10 @@
         directionalLight2.position.set(-500, 300, -500);
         scene.add(directionalLight2);
 
-        // Ground plane material (geometry created after STL loads to match size)
-        const groundMaterial = new THREE.MeshStandardMaterial({
-            color: 0x2a2a3a,
-            roughness: 0.9
-        });
-
         // Load STL
         const loader = new STLLoader();
         loader.load(
-            'nyc_block.stl',
+            'multiblock.stl',
             function (geometry) {
                 document.getElementById('loading').style.display = 'none';
 
@@ -149,15 +143,6 @@
                 camera.position.set(maxDim, maxDim * 0.8, maxDim);
                 controls.target.set(0, size.y / 4, 0);
                 controls.update();
-
-                // Create ground plane sized to model and position at lowest point
-                const groundSize = maxDim * 3;
-                const groundGeometry = new THREE.PlaneGeometry(groundSize, groundSize);
-                const ground = new THREE.Mesh(groundGeometry, groundMaterial);
-                ground.rotation.x = -Math.PI / 2;
-                ground.receiveShadow = true;
-                ground.position.y = geometry.boundingBox.min.y;
-                scene.add(ground);
             },
             function (xhr) {
                 const percent = (xhr.loaded / xhr.total * 100).toFixed(0);
