@@ -11,13 +11,17 @@ Usage:
 """
 
 import argparse
+import base64
 import json
 import math
+import mimetypes
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from PIL import Image
 from shapely.geometry import Polygon as ShapelyPolygon
 from shapely.strtree import STRtree
 
@@ -40,6 +44,16 @@ class PlateMetadata:
     scale: float       # Scale factor
     pos_x: float       # Final X position on reference canvas
     pos_y: float       # Final Y position on reference canvas
+
+
+@dataclass
+class BackgroundImage:
+    """Background image configuration."""
+    path: Path         # Path to the image file
+    width: int         # Image width in pixels
+    height: int        # Image height in pixels
+    angle: float       # Rotation angle in degrees
+    data_uri: str      # Base64 data URI for embedding
 
 
 @dataclass
@@ -196,6 +210,56 @@ def load_metadata(metadata_path: Path) -> PlateMetadata:
     )
 
 
+def load_background_image(image_path: Path) -> Optional[BackgroundImage]:
+    """Load background image and its metadata.
+
+    Expects a .metadata.json file alongside the image with rotation angle.
+    Embeds the image as a base64 data URI for Affinity Designer compatibility.
+    """
+    if not image_path.exists():
+        print(f"Warning: Background image not found: {image_path}")
+        return None
+
+    # Load image and convert to JPEG for embedding (widely supported)
+    try:
+        with Image.open(image_path) as img:
+            width, height = img.size
+
+            # Convert to RGB if necessary (e.g., for RGBA or palette images)
+            if img.mode in ('RGBA', 'LA', 'P'):
+                img = img.convert('RGB')
+
+            # Encode as JPEG to base64
+            import io
+            buffer = io.BytesIO()
+            img.save(buffer, format='JPEG', quality=85)
+            b64_data = base64.b64encode(buffer.getvalue()).decode('ascii')
+            data_uri = f"data:image/jpeg;base64,{b64_data}"
+
+    except Exception as e:
+        print(f"Warning: Could not read image {image_path}: {e}")
+        return None
+
+    # Load metadata (angle)
+    metadata_path = image_path.parent / f"{image_path.stem}.metadata.json"
+    angle = 0.0
+    if metadata_path.exists():
+        try:
+            with open(metadata_path) as f:
+                data = json.load(f)
+                angle = data.get("angle", 0.0)
+        except Exception as e:
+            print(f"Warning: Could not read metadata {metadata_path}: {e}")
+
+    return BackgroundImage(
+        path=image_path,
+        width=width,
+        height=height,
+        angle=angle,
+        data_uri=data_uri
+    )
+
+
 def transform_point(
     x: float, y: float,
     plate_center_x: float, plate_center_y: float,
@@ -345,7 +409,8 @@ def generate_output_svg(
     polygons: List[CombinedPolygon],
     bbox: Tuple[float, float, float, float],
     output_path: Path,
-    margin: float = 50.0
+    margin: float = 50.0,
+    background: Optional[BackgroundImage] = None
 ):
     """Generate the combined output SVG file."""
     min_x, min_y, max_x, max_y = bbox
@@ -365,16 +430,30 @@ def generate_output_svg(
             by_plate[poly.source_plate][poly.source_block] = []
         by_plate[poly.source_plate][poly.source_block].append(poly)
 
-    # Generate SVG
+    # Generate SVG with xlink namespace for Affinity compatibility
     lines = [
         '<?xml version="1.0" encoding="utf-8"?>',
         f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'xmlns:xlink="http://www.w3.org/1999/xlink" '
         f'width="{view_width:.0f}" height="{view_height:.0f}" '
         f'viewBox="{view_min_x:.2f} {view_min_y:.2f} {view_width:.2f} {view_height:.2f}">',
         '',
         f'  <!-- Combined from {len(by_plate)} plates, {len(polygons)} polygons -->',
         '',
     ]
+
+    # Add background image if provided (embedded as base64 for Affinity compatibility)
+    if background:
+        # The background image is rotated around its center
+        cx = background.width / 2
+        cy = background.height / 2
+
+        lines.append('  <!-- Background reference map (embedded) -->')
+        lines.append(f'  <image xlink:href="{background.data_uri}" '
+                     f'x="0" y="0" '
+                     f'width="{background.width}" height="{background.height}" '
+                     f'transform="rotate({background.angle} {cx} {cy})" />')
+        lines.append('')
 
     for plate_id in sorted(by_plate.keys()):
         plate_blocks = by_plate[plate_id]
@@ -535,12 +614,25 @@ def main():
         default=50.0,
         help="Margin around the bounding box (default: 50)"
     )
+    parser.add_argument(
+        "--background",
+        type=Path,
+        help="Background image (JP2/JPEG/PNG) to include with xlink:href"
+    )
     args = parser.parse_args()
 
     # Validate input file
     if not args.input_json.exists():
         print(f"Error: Input file not found: {args.input_json}")
         return 1
+
+    # Load background image if specified
+    background = None
+    if args.background:
+        print(f"Loading background image: {args.background}")
+        background = load_background_image(args.background)
+        if background:
+            print(f"  Size: {background.width}x{background.height}, rotation: {background.angle:.1f}°")
 
     # Parse input
     print(f"Reading {args.input_json}")
@@ -555,7 +647,7 @@ def main():
         return 1
 
     # Generate output
-    generate_output_svg(polygons, bbox, args.output, args.margin)
+    generate_output_svg(polygons, bbox, args.output, args.margin, background)
 
     # Run overlap test
     print("\n--- Cross-plate overlap test ---")
