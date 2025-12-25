@@ -3,4 +3,5 @@
 *.jp2
 .DS_Store
 *.svg
+__pycache__/
 
