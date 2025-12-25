@@ -18,6 +18,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from shapely.geometry import Polygon as ShapelyPolygon
+from shapely.strtree import STRtree
+
+# The metadata scale factor is designed for thumbnail images (10% of original).
+# For full-size plate coordinates, we need this correction factor.
+THUMBNAIL_SCALE_CORRECTION = 0.1
+
 
 @dataclass
 class PlateEntry:
@@ -197,9 +204,13 @@ def transform_point(
 ) -> Tuple[float, float]:
     """Transform a single point using plate metadata.
 
+    The metadata (angle, scale, pos) is designed for thumbnail images which
+    are 10% of the original plate size. For full-size plate coordinates,
+    we apply the THUMBNAIL_SCALE_CORRECTION.
+
     Transformation order (matches CSS transform in align.py):
     1. Translate point relative to plate center (subtract center)
-    2. Scale around origin
+    2. Apply effective scale (scale * THUMBNAIL_SCALE_CORRECTION for full-size coords)
     3. Rotate around origin
     4. Translate to final position
     """
@@ -207,9 +218,11 @@ def transform_point(
     px = x - plate_center_x
     py = y - plate_center_y
 
-    # Step 2: Scale
-    px *= scale
-    py *= scale
+    # Step 2: Scale (corrected for full-size plate coordinates)
+    # The metadata scale is for thumbnails (10% size), so we multiply by 0.1
+    effective_scale = scale * THUMBNAIL_SCALE_CORRECTION
+    px *= effective_scale
+    py *= effective_scale
 
     # Step 3: Rotate (convert degrees to radians)
     angle_rad = math.radians(angle_deg)
@@ -397,6 +410,110 @@ def generate_output_svg(
     print(f"Canvas size: {view_width:.0f} x {view_height:.0f}")
 
 
+def test_cross_plate_overlap(
+    polygons: List[CombinedPolygon],
+    max_overlap_percent: float = 5.0
+) -> Tuple[bool, Dict[str, dict]]:
+    """Test that polygons from different plates don't overlap more than threshold.
+
+    Args:
+        polygons: List of combined polygons with source plate info
+        max_overlap_percent: Maximum allowed percentage of polygons that can overlap
+
+    Returns:
+        (passed, results_dict) where results_dict has per-plate overlap statistics
+    """
+    # Group polygons by source plate
+    by_plate: Dict[str, List[Tuple[int, CombinedPolygon]]] = {}
+    for idx, poly in enumerate(polygons):
+        if poly.source_plate not in by_plate:
+            by_plate[poly.source_plate] = []
+        by_plate[poly.source_plate].append((idx, poly))
+
+    plates = list(by_plate.keys())
+    if len(plates) < 2:
+        return True, {"message": "Less than 2 plates, no cross-plate overlap possible"}
+
+    results: Dict[str, dict] = {}
+    all_passed = True
+
+    # For each plate, count how many of its polygons overlap with any other plate's polygons
+    for plate_id in plates:
+        plate_polygons = by_plate[plate_id]
+        other_polygons: List[Tuple[int, CombinedPolygon]] = []
+        for other_plate in plates:
+            if other_plate != plate_id:
+                other_polygons.extend(by_plate[other_plate])
+
+        if not other_polygons:
+            results[plate_id] = {
+                "total": len(plate_polygons),
+                "overlapping": 0,
+                "percent": 0.0,
+                "passed": True
+            }
+            continue
+
+        # Build spatial index for other plates' polygons
+        other_shapely = []
+        for idx, poly in other_polygons:
+            if len(poly.points) >= 3:
+                try:
+                    sp = ShapelyPolygon(poly.points)
+                    if sp.is_valid and sp.area > 0:
+                        other_shapely.append(sp)
+                except:
+                    pass
+
+        if not other_shapely:
+            results[plate_id] = {
+                "total": len(plate_polygons),
+                "overlapping": 0,
+                "percent": 0.0,
+                "passed": True
+            }
+            continue
+
+        tree = STRtree(other_shapely)
+
+        # Count overlapping polygons from this plate
+        overlapping_count = 0
+        for idx, poly in plate_polygons:
+            if len(poly.points) < 3:
+                continue
+            try:
+                sp = ShapelyPolygon(poly.points)
+                if not sp.is_valid or sp.area <= 0:
+                    continue
+
+                # Query spatial index for potential overlaps
+                candidates = tree.query(sp)
+                for candidate in candidates:
+                    if sp.intersects(candidate):
+                        intersection = sp.intersection(candidate)
+                        # Only count as overlap if intersection area is significant (>1% of polygon area)
+                        if intersection.area > sp.area * 0.01:
+                            overlapping_count += 1
+                            break
+            except:
+                pass
+
+        percent = (overlapping_count / len(plate_polygons) * 100) if plate_polygons else 0
+        passed = percent <= max_overlap_percent
+
+        results[plate_id] = {
+            "total": len(plate_polygons),
+            "overlapping": overlapping_count,
+            "percent": round(percent, 2),
+            "passed": passed
+        }
+
+        if not passed:
+            all_passed = False
+
+    return all_passed, results
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Combine multiple segmentation SVG files into a single output SVG."
@@ -440,7 +557,22 @@ def main():
     # Generate output
     generate_output_svg(polygons, bbox, args.output, args.margin)
 
-    return 0
+    # Run overlap test
+    print("\n--- Cross-plate overlap test ---")
+    passed, results = test_cross_plate_overlap(polygons, max_overlap_percent=5.0)
+
+    for plate_id, stats in sorted(results.items()):
+        if isinstance(stats, dict) and "total" in stats:
+            status = "PASS" if stats["passed"] else "FAIL"
+            print(f"  {plate_id}: {stats['overlapping']}/{stats['total']} "
+                  f"({stats['percent']:.1f}%) overlapping with other plates [{status}]")
+
+    if passed:
+        print("\nOverlap test PASSED: All plates have <5% cross-plate overlap")
+        return 0
+    else:
+        print("\nOverlap test FAILED: Some plates have >5% cross-plate overlap")
+        return 1
 
 
 if __name__ == "__main__":
