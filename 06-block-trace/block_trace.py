@@ -156,6 +156,7 @@ def segments_to_path_string(segments: list) -> str:
 
     Groups contiguous segments into subpaths and uses svgpathtools' native
     d() method to preserve original segment types (curves, arcs, etc).
+    Closes subpaths that form closed loops.
     """
     if not segments:
         return ""
@@ -182,7 +183,16 @@ def segments_to_path_string(segments: list) -> str:
     for subpath_segments in subpaths:
         # Create a Path object from segments and get its d string
         subpath = SvgPath(*subpath_segments)
-        d_parts.append(subpath.d())
+        d_str = subpath.d()
+
+        # Check if subpath forms a closed loop (end ≈ start)
+        first_start = subpath_segments[0].start
+        last_end = subpath_segments[-1].end
+        if abs(last_end - first_start) < 0.5:
+            # It's a closed loop - add Z command
+            d_str += " Z"
+
+        d_parts.append(d_str)
 
     return " ".join(d_parts)
 

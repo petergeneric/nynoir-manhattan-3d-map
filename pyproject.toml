@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "craft-text-detector>=0.4.1",
     "easyocr>=1.7.2",
     "lxml>=6.0.2",
     "numpy>=2.4.0",
