@@ -17,8 +17,9 @@ Output: SVG file with additional <g id="block-traces"> group containing
 import sys
 from pathlib import Path
 from lxml import etree
-from svgpathtools import parse_path, Path as SvgPath
-from shapely.geometry import Polygon, Point
+from svgpathtools import parse_path, Path as SvgPath, Line
+from shapely.geometry import Polygon, Point, LineString
+from shapely.ops import split
 
 # Paths
 INPUT_SVG = Path(__file__).parent.parent.parent / "media" / "p2.svg"
@@ -27,6 +28,9 @@ OUTPUT_SVG = Path(__file__).parent / "blocktraced.svg"
 # SVG namespace
 SVG_NS = "http://www.w3.org/2000/svg"
 NSMAP = {None: SVG_NS}
+
+# Number of points to sample along curves for intersection testing
+CURVE_SAMPLES = 20
 
 
 def parse_polygon_points(points_str: str) -> list[tuple[float, float]]:
@@ -39,16 +43,112 @@ def parse_polygon_points(points_str: str) -> list[tuple[float, float]]:
     return coords
 
 
-def segment_in_polygon(segment, polygon: Polygon) -> bool:
-    """Test if segment's endpoints are inside polygon."""
+def point_in_polygon(x: float, y: float, polygon: Polygon) -> bool:
+    """Test if a point is inside the polygon."""
+    return polygon.contains(Point(x, y))
+
+
+def segment_to_linestring(segment, num_samples: int = CURVE_SAMPLES) -> LineString:
+    """Convert an SVG path segment to a Shapely LineString.
+
+    For curves, samples points along the curve to approximate it.
+    """
+    points = []
+    for i in range(num_samples + 1):
+        t = i / num_samples
+        pt = segment.point(t)
+        points.append((pt.real, pt.imag))
+    return LineString(points)
+
+
+def clip_segment_to_polygon(segment, polygon: Polygon) -> list:
+    """Clip a single segment to a polygon.
+
+    Returns a list of Line segments representing the clipped result.
+    For segments fully inside, returns the original segment.
+    For segments crossing the boundary, returns clipped line segments.
+    For segments fully outside, returns empty list.
+    """
     start = Point(segment.start.real, segment.start.imag)
     end = Point(segment.end.real, segment.end.imag)
-    return polygon.contains(start) and polygon.contains(end)
+
+    start_inside = polygon.contains(start)
+    end_inside = polygon.contains(end)
+
+    # Case 1: Both endpoints inside - keep original segment
+    if start_inside and end_inside:
+        # But we need to check if the segment crosses outside and back
+        # Sample points along the segment to check
+        all_inside = True
+        for i in range(1, CURVE_SAMPLES):
+            t = i / CURVE_SAMPLES
+            pt = segment.point(t)
+            if not polygon.contains(Point(pt.real, pt.imag)):
+                all_inside = False
+                break
+
+        if all_inside:
+            return [segment]
+        # Falls through to geometric clipping below
+
+    # Case 2: Both endpoints outside - might still cross through
+    # Case 3: One inside, one outside - definitely crosses
+    # Use geometric intersection for all crossing cases
+
+    # Convert segment to LineString
+    ls = segment_to_linestring(segment)
+
+    # Intersect with polygon
+    intersection = ls.intersection(polygon)
+
+    if intersection.is_empty:
+        return []
+
+    # Convert intersection result to Line segments
+    result = []
+
+    if intersection.geom_type == 'LineString':
+        coords = list(intersection.coords)
+        for i in range(len(coords) - 1):
+            x1, y1 = coords[i]
+            x2, y2 = coords[i + 1]
+            result.append(Line(complex(x1, y1), complex(x2, y2)))
+
+    elif intersection.geom_type == 'MultiLineString':
+        for line in intersection.geoms:
+            coords = list(line.coords)
+            for i in range(len(coords) - 1):
+                x1, y1 = coords[i]
+                x2, y2 = coords[i + 1]
+                result.append(Line(complex(x1, y1), complex(x2, y2)))
+
+    elif intersection.geom_type == 'Point':
+        # Single point intersection - skip
+        pass
+
+    elif intersection.geom_type == 'MultiPoint':
+        # Multiple point intersections - skip
+        pass
+
+    elif intersection.geom_type == 'GeometryCollection':
+        # Mixed results - extract LineStrings
+        for geom in intersection.geoms:
+            if geom.geom_type == 'LineString':
+                coords = list(geom.coords)
+                for i in range(len(coords) - 1):
+                    x1, y1 = coords[i]
+                    x2, y2 = coords[i + 1]
+                    result.append(Line(complex(x1, y1), complex(x2, y2)))
+
+    return result
 
 
 def clip_path_to_polygon(path: SvgPath, polygon: Polygon) -> list:
-    """Return segments where both endpoints are inside polygon."""
-    return [seg for seg in path if segment_in_polygon(seg, polygon)]
+    """Clip all segments in path to polygon with proper geometric clipping."""
+    clipped = []
+    for segment in path:
+        clipped.extend(clip_segment_to_polygon(segment, polygon))
+    return clipped
 
 
 def segments_to_path_string(segments: list) -> str:
