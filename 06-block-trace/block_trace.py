@@ -25,6 +25,7 @@ Output: SVG file with hierarchical structure:
 
 import sys
 import json
+import argparse
 from pathlib import Path
 from lxml import etree
 from svgpathtools import parse_path, Path as SvgPath, Line
@@ -54,6 +55,9 @@ LOW_TEXT = 0.4
 # Morphological filtering parameters
 MAX_TEXT_AREA = 5000  # pixels^2 - paths larger than this are not text
 MAX_TEXT_ASPECT = 10  # paths more elongated than this are not text
+
+# Default minimum size filter for output paths (configurable via --min-size)
+DEFAULT_MIN_PATH_SIZE = 40  # pixels - paths with longest bbox side < this are deleted
 
 
 def parse_polygon_points(points_str: str) -> list[tuple[float, float]]:
@@ -333,6 +337,16 @@ def has_text_morphology(subpath_segments: list) -> bool:
     return True
 
 
+def meets_minimum_size(subpath_segments: list, min_size: float) -> bool:
+    """Check if subpath's longest bounding box side is >= min_size."""
+    bounds = get_subpath_bounds(subpath_segments)
+    x_min, y_min, x_max, y_max = bounds.bounds
+    width = x_max - x_min
+    height = y_max - y_min
+    longest_side = max(width, height)
+    return longest_side >= min_size
+
+
 def is_text_path(subpath_segments: list, text_boxes: list[Polygon]) -> bool:
     """Determine if a subpath is text based on detection boxes and morphology.
 
@@ -364,6 +378,39 @@ def subpaths_to_path_string(subpaths: list[list]) -> str:
     if not subpaths:
         return ""
     return " ".join(subpath_to_path_string(sp) for sp in subpaths)
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description='Clip autotrace paths by block polygons with text filtering.',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument(
+        '-i', '--input',
+        type=Path,
+        default=INPUT_SVG,
+        help='Input SVG file path'
+    )
+    parser.add_argument(
+        '-o', '--output',
+        type=Path,
+        default=OUTPUT_SVG,
+        help='Output SVG file path'
+    )
+    parser.add_argument(
+        '--min-size',
+        type=float,
+        default=DEFAULT_MIN_PATH_SIZE,
+        metavar='PX',
+        help='Minimum path size (longest bbox side) in pixels; smaller paths are deleted'
+    )
+    parser.add_argument(
+        '--no-size-filter',
+        action='store_true',
+        help='Disable minimum size filtering (keep all paths regardless of size)'
+    )
+    return parser.parse_args()
 
 
 def add_ocr_bounds_to_svg(root, horizontal_boxes: list, free_boxes: list):
@@ -403,17 +450,23 @@ def add_ocr_bounds_to_svg(root, horizontal_boxes: list, free_boxes: list):
 
 
 def main():
-    print(f"Loading SVG: {INPUT_SVG}")
+    args = parse_args()
+
+    print(f"Loading SVG: {args.input}")
+    if args.no_size_filter:
+        print("Size filtering: disabled")
+    else:
+        print(f"Min path size: {args.min_size}px")
 
     # Parse SVG
-    parser = etree.XMLParser(remove_blank_text=True)
-    tree = etree.parse(str(INPUT_SVG), parser)
+    xml_parser = etree.XMLParser(remove_blank_text=True)
+    tree = etree.parse(str(args.input), xml_parser)
     root = tree.getroot()
 
     # Extract image and run text detection
-    image_path = extract_image_path_from_svg(INPUT_SVG, root)
+    image_path = extract_image_path_from_svg(args.input, root)
     print(f"Image path: {image_path}")
-    text_boxes, raw_horizontal, raw_free = detect_text_regions(image_path, INPUT_SVG)
+    text_boxes, raw_horizontal, raw_free = detect_text_regions(image_path, args.input)
 
     # Add OCR bounding boxes to SVG for reference
     add_ocr_bounds_to_svg(root, raw_horizontal, raw_free)
@@ -444,6 +497,7 @@ def main():
     # Process each block
     total_autotrace = 0
     total_text = 0
+    total_filtered = 0
     blocks_processed = 0
 
     for poly_elem in polygons:
@@ -480,19 +534,28 @@ def main():
             else:
                 autotrace_subpaths.append(subpath)
 
+        # Filter autotrace subpaths by minimum size (unless disabled)
+        if args.no_size_filter:
+            filtered_subpaths = autotrace_subpaths
+            filtered_count = 0
+        else:
+            filtered_subpaths = [sp for sp in autotrace_subpaths if meets_minimum_size(sp, args.min_size)]
+            filtered_count = len(autotrace_subpaths) - len(filtered_subpaths)
+
         blocks_processed += 1
-        total_autotrace += len(autotrace_subpaths)
+        total_autotrace += len(filtered_subpaths)
         total_text += len(text_subpaths)
+        total_filtered += filtered_count
 
         # Create block group
         block_group = etree.SubElement(traces_group, f'{{{SVG_NS}}}g', id=block_name)
 
-        # Add autotrace path
-        if autotrace_subpaths:
-            autotrace_d = subpaths_to_path_string(autotrace_subpaths)
+        # Add each autotrace subpath as a separate path element
+        for i, subpath in enumerate(filtered_subpaths):
+            path_d = subpath_to_path_string(subpath)
             path_attribs = {
-                'id': 'autotrace',
-                'd': autotrace_d,
+                'id': f'p{i+1:04d}',
+                'd': path_d,
                 'fill': 'none',
                 'stroke': stroke_color,
                 'stroke-width': '2',
@@ -515,18 +578,23 @@ def main():
             }
             etree.SubElement(text_group, f'{{{SVG_NS}}}path', **text_attribs)
 
-        print(f"  Block {block_name}: {len(autotrace_subpaths)} autotrace, {len(text_subpaths)} text subpaths")
+        if args.no_size_filter:
+            print(f"  Block {block_name}: {len(filtered_subpaths)} paths, {len(text_subpaths)} text")
+        else:
+            print(f"  Block {block_name}: {len(filtered_subpaths)} paths ({filtered_count} filtered), {len(text_subpaths)} text")
 
     print(f"\nSummary:")
     print(f"  Blocks processed: {blocks_processed}/{len(polygons)}")
-    print(f"  Total autotrace subpaths: {total_autotrace:,}")
+    print(f"  Total path elements: {total_autotrace:,}")
+    if not args.no_size_filter:
+        print(f"  Filtered (< {args.min_size}px): {total_filtered:,}")
     print(f"  Total text subpaths: {total_text:,}")
 
     # Write output
-    print(f"\nWriting output: {OUTPUT_SVG}")
-    tree.write(str(OUTPUT_SVG), encoding='utf-8', xml_declaration=True, pretty_print=True)
+    print(f"\nWriting output: {args.output}")
+    tree.write(str(args.output), encoding='utf-8', xml_declaration=True, pretty_print=True)
 
-    output_size = OUTPUT_SVG.stat().st_size
+    output_size = args.output.stat().st_size
     print(f"Output file size: {output_size:,} bytes ({output_size/1024/1024:.1f} MB)")
     print("Done!")
 
