@@ -41,6 +41,15 @@ ET.register_namespace('xlink', XLINK_NS)
 ET.register_namespace('atlas', ATLAS_NS)
 
 
+def natural_sort_key(path: Path) -> list:
+    """
+    Generate a sort key for natural/human sorting.
+    Splits the name into text and numeric parts so 'p4' comes before 'p15'.
+    """
+    parts = re.split(r'(\d+)', path.name)
+    return [int(part) if part.isdigit() else part.lower() for part in parts]
+
+
 def parse_polygon_points(points_str: str) -> list[tuple[float, float]]:
     """Parse SVG polygon points string into list of (x, y) tuples."""
     points = []
@@ -198,13 +207,13 @@ def get_plates() -> list[dict]:
     if not OUTPUT_DIR.exists():
         return plates
 
-    for volume_dir in sorted(OUTPUT_DIR.iterdir()):
+    for volume_dir in sorted(OUTPUT_DIR.iterdir(), key=natural_sort_key):
         if not volume_dir.is_dir():
             continue
 
         volume = volume_dir.name
 
-        for plate_dir in sorted(volume_dir.iterdir()):
+        for plate_dir in sorted(volume_dir.iterdir(), key=natural_sort_key):
             if not plate_dir.is_dir():
                 continue
 
