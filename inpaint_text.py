@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-Text Detection and Inpainting Experiment
+Text Detection and Inpainting
 
-Uses EasyOCR to detect text regions in an image, then uses OpenCV
-inpainting to remove the text and fill in the background.
+Uses EasyOCR to detect text regions in an image, then uses LaMa
+(Large Mask Inpainting) to remove the text and fill in the background.
 
 Usage:
     uv run python inpaint_text.py
     uv run python inpaint_text.py -i /path/to/input.png -o /path/to/output.png
-    uv run python inpaint_text.py --method telea  # Use Telea inpainting
     uv run python inpaint_text.py --expand 5      # Expand mask by 5 pixels
+
+    # OCR tuning options
+    uv run python inpaint_text.py --text-threshold 0.5   # Lower = more sensitive
+    uv run python inpaint_text.py --link-threshold 0.05  # Lower = more character grouping
+    uv run python inpaint_text.py --low-text 0.3         # Lower = detect fainter text
 """
 
 import argparse
@@ -19,17 +23,16 @@ import json
 import cv2
 import numpy as np
 import torch
-import easyocr
 from PIL import Image
 
 # Default paths
 DEFAULT_INPUT = Path(__file__).parent.parent / "media" / "p2-mono.png"
 DEFAULT_OUTPUT = Path(__file__).parent / "inpainted.png"
 
-# OCR parameters
-TEXT_THRESHOLD = 0.7
-LINK_THRESHOLD = 0.1
-LOW_TEXT = 0.4
+# Default OCR parameters
+DEFAULT_TEXT_THRESHOLD = 0.7
+DEFAULT_LINK_THRESHOLD = 0.1
+DEFAULT_LOW_TEXT = 0.4
 
 
 def get_cache_path(image_path: Path) -> Path:
@@ -37,8 +40,8 @@ def get_cache_path(image_path: Path) -> Path:
     return image_path.with_suffix(image_path.suffix + '.ocr_cache.json')
 
 
-def load_ocr_cache(cache_path: Path, image_path: Path) -> tuple[list, list] | None:
-    """Load OCR results from cache if valid."""
+def load_ocr_cache(cache_path: Path, image_path: Path, params: dict) -> tuple[list, list] | None:
+    """Load OCR results from cache if valid and params match."""
     if not cache_path.exists():
         return None
 
@@ -49,6 +52,13 @@ def load_ocr_cache(cache_path: Path, image_path: Path) -> tuple[list, list] | No
     try:
         with open(cache_path, 'r') as f:
             data = json.load(f)
+
+        # Check if cached params match current params
+        cached_params = data.get('params', {})
+        if cached_params != params:
+            print("OCR cache params don't match - will regenerate")
+            return None
+
         print(f"Loaded OCR cache from {cache_path}")
         return data['horizontal'], data['free']
     except (json.JSONDecodeError, KeyError) as e:
@@ -56,25 +66,44 @@ def load_ocr_cache(cache_path: Path, image_path: Path) -> tuple[list, list] | No
         return None
 
 
-def save_ocr_cache(cache_path: Path, horizontal: list, free: list):
+def save_ocr_cache(cache_path: Path, horizontal: list, free: list, params: dict):
     """Save OCR results to cache."""
-    data = {'horizontal': horizontal, 'free': free}
+    data = {'horizontal': horizontal, 'free': free, 'params': params}
     with open(cache_path, 'w') as f:
         json.dump(data, f)
     print(f"Saved OCR cache to {cache_path}")
 
 
-def detect_text_regions(image_path: Path) -> tuple[list, list]:
+def detect_text_regions(
+    image_path: Path,
+    text_threshold: float = DEFAULT_TEXT_THRESHOLD,
+    link_threshold: float = DEFAULT_LINK_THRESHOLD,
+    low_text: float = DEFAULT_LOW_TEXT,
+) -> tuple[list, list]:
     """
     Run EasyOCR to detect text regions.
+
+    Args:
+        image_path: Path to the input image
+        text_threshold: Text confidence threshold (lower = more sensitive)
+        link_threshold: Link threshold for grouping characters (lower = more grouping)
+        low_text: Low text threshold (lower = detect fainter text)
 
     Returns:
         tuple: (horizontal_boxes, free_boxes)
             - horizontal_boxes: [[x_min, x_max, y_min, y_max], ...]
             - free_boxes: [[[x1,y1], [x2,y2], [x3,y3], [x4,y4]], ...]
     """
+    import easyocr
+
+    params = {
+        'text_threshold': text_threshold,
+        'link_threshold': link_threshold,
+        'low_text': low_text,
+    }
+
     cache_path = get_cache_path(image_path)
-    cached = load_ocr_cache(cache_path, image_path)
+    cached = load_ocr_cache(cache_path, image_path, params)
 
     if cached is not None:
         return cached
@@ -97,11 +126,13 @@ def detect_text_regions(image_path: Path) -> tuple[list, list]:
         width, height = img.size
 
     print(f"Running text detection on {image_path.name} ({width}x{height})...")
+    print(f"  text_threshold={text_threshold}, link_threshold={link_threshold}, low_text={low_text}")
+
     horizontal_boxes, free_boxes = reader.detect(
         str(image_path),
-        text_threshold=TEXT_THRESHOLD,
-        link_threshold=LINK_THRESHOLD,
-        low_text=LOW_TEXT,
+        text_threshold=text_threshold,
+        link_threshold=link_threshold,
+        low_text=low_text,
         canvas_size=max(width, height),
     )
 
@@ -120,7 +151,7 @@ def detect_text_regions(image_path: Path) -> tuple[list, list]:
             coords = [[float(pt[0]), float(pt[1])] for pt in box]
             raw_free.append(coords)
 
-    save_ocr_cache(cache_path, raw_horizontal, raw_free)
+    save_ocr_cache(cache_path, raw_horizontal, raw_free, params)
 
     print(f"Detected {len(raw_horizontal)} horizontal + {len(raw_free)} free-form text regions")
     return raw_horizontal, raw_free
@@ -169,36 +200,71 @@ def create_text_mask(
     return mask
 
 
-def inpaint_image(
-    image: np.ndarray,
-    mask: np.ndarray,
-    method: str = 'ns',
-    radius: int = 5
-) -> np.ndarray:
+def get_device() -> torch.device:
+    """Get the best available device (MPS > CUDA > CPU)."""
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    elif torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
+def load_lama_model(device: torch.device):
+    """Load LaMa model with proper device mapping for non-CUDA systems."""
+    from simple_lama_inpainting.utils import download_model
+    from simple_lama_inpainting.models.model import LAMA_MODEL_URL
+
+    model_path = download_model(LAMA_MODEL_URL)
+
+    # Load with map_location to handle CUDA->CPU/MPS conversion
+    model = torch.jit.load(model_path, map_location='cpu')
+    model = model.to(device)
+    model.eval()
+
+    return model
+
+
+def inpaint_lama(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
     """
-    Inpaint the image to remove text regions.
+    Inpaint using LaMa (Large Mask Inpainting) deep learning model.
 
     Args:
-        image: Input image (BGR or grayscale)
+        image: Input image (BGR)
         mask: Binary mask where 255 = regions to inpaint
-        method: 'ns' (Navier-Stokes) or 'telea' (Alexandru Telea)
-        radius: Inpainting radius
 
     Returns:
-        Inpainted image
+        Inpainted image (BGR)
     """
-    if method == 'telea':
-        flags = cv2.INPAINT_TELEA
-    else:
-        flags = cv2.INPAINT_NS
+    from simple_lama_inpainting.utils import prepare_img_and_mask
 
-    return cv2.inpaint(image, mask, radius, flags)
+    # Convert BGR to RGB for PIL
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    pil_image = Image.fromarray(image_rgb)
+    pil_mask = Image.fromarray(mask)
+
+    # Load model with proper device handling
+    device = get_device()
+    print(f"Loading LaMa model on {device}...")
+    model = load_lama_model(device)
+
+    # Prepare inputs
+    img_tensor, mask_tensor = prepare_img_and_mask(pil_image, pil_mask, device)
+
+    # Run inference
+    with torch.inference_mode():
+        inpainted = model(img_tensor, mask_tensor)
+        cur_res = inpainted[0].permute(1, 2, 0).detach().cpu().numpy()
+        cur_res = np.clip(cur_res * 255, 0, 255).astype(np.uint8)
+
+    # Convert RGB back to BGR
+    result_bgr = cv2.cvtColor(cur_res, cv2.COLOR_RGB2BGR)
+    return result_bgr
 
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description='Detect and inpaint text from images using EasyOCR and OpenCV.',
+        description='Detect and remove text from images using EasyOCR + LaMa inpainting.',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument(
@@ -214,35 +280,53 @@ def parse_args() -> argparse.Namespace:
         help='Output image path'
     )
     parser.add_argument(
-        '--method',
-        choices=['ns', 'telea'],
-        default='ns',
-        help='Inpainting method: ns (Navier-Stokes) or telea (Alexandru Telea)'
-    )
-    parser.add_argument(
-        '--radius',
-        type=int,
-        default=5,
-        help='Inpainting radius in pixels'
-    )
-    parser.add_argument(
         '--expand',
         type=int,
         default=3,
         help='Pixels to expand text mask by (dilation)'
     )
-    parser.add_argument(
+
+    # OCR tuning parameters
+    ocr_group = parser.add_argument_group('OCR tuning')
+    ocr_group.add_argument(
+        '--text-threshold',
+        type=float,
+        default=DEFAULT_TEXT_THRESHOLD,
+        help='Text confidence threshold (lower = more sensitive, range 0-1)'
+    )
+    ocr_group.add_argument(
+        '--link-threshold',
+        type=float,
+        default=DEFAULT_LINK_THRESHOLD,
+        help='Link threshold for character grouping (lower = more grouping, range 0-1)'
+    )
+    ocr_group.add_argument(
+        '--low-text',
+        type=float,
+        default=DEFAULT_LOW_TEXT,
+        help='Low text threshold (lower = detect fainter text, range 0-1)'
+    )
+    ocr_group.add_argument(
+        '--no-cache',
+        action='store_true',
+        help='Ignore OCR cache and re-run detection'
+    )
+
+    # Debug options
+    debug_group = parser.add_argument_group('Debug options')
+    debug_group.add_argument(
         '--save-mask',
         type=Path,
         default=None,
-        help='Optional path to save the text mask image'
+        help='Save the text mask image to this path'
     )
-    parser.add_argument(
+    debug_group.add_argument(
         '--save-debug',
         type=Path,
         default=None,
-        help='Optional path to save debug image with detected boxes'
+        help='Save debug image with detected boxes to this path'
     )
+
     return parser.parse_args()
 
 
@@ -251,9 +335,15 @@ def main():
 
     print(f"Input: {args.input}")
     print(f"Output: {args.output}")
-    print(f"Inpainting method: {args.method} (radius={args.radius})")
     print(f"Mask expansion: {args.expand}px")
     print()
+
+    # Delete cache if --no-cache specified
+    if args.no_cache:
+        cache_path = get_cache_path(args.input)
+        if cache_path.exists():
+            cache_path.unlink()
+            print(f"Deleted OCR cache: {cache_path}")
 
     # Load image
     image = cv2.imread(str(args.input))
@@ -265,7 +355,12 @@ def main():
     print(f"Image size: {width}x{height}")
 
     # Detect text regions
-    horizontal_boxes, free_boxes = detect_text_regions(args.input)
+    horizontal_boxes, free_boxes = detect_text_regions(
+        args.input,
+        text_threshold=args.text_threshold,
+        link_threshold=args.link_threshold,
+        low_text=args.low_text,
+    )
     total_regions = len(horizontal_boxes) + len(free_boxes)
 
     if total_regions == 0:
@@ -297,9 +392,9 @@ def main():
         cv2.imwrite(str(args.save_debug), debug_img)
         print(f"Saved debug image to {args.save_debug}")
 
-    # Inpaint
-    print(f"\nInpainting with {args.method} method (radius={args.radius})...")
-    result = inpaint_image(image, mask, args.method, args.radius)
+    # Inpaint with LaMa
+    print(f"\nInpainting with LaMa...")
+    result = inpaint_lama(image, mask)
 
     # Save result
     cv2.imwrite(str(args.output), result)
