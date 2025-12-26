@@ -2,7 +2,7 @@
 """
 Text Detection and Inpainting
 
-Uses EasyOCR to detect text regions in an image, then uses LaMa
+Detects text regions using DBNet++ or CRAFT pixel-level detectors, then uses LaMa
 (Large Mask Inpainting) to remove the text and fill in the background.
 
 Usage:
@@ -10,15 +10,18 @@ Usage:
     uv run python inpaint_text.py -i /path/to/input.png -o /path/to/output.png
     uv run python inpaint_text.py --expand 5      # Expand mask by 5 pixels
 
-    # OCR tuning options
-    uv run python inpaint_text.py --text-threshold 0.5   # Lower = more sensitive
-    uv run python inpaint_text.py --link-threshold 0.05  # Lower = more character grouping
-    uv run python inpaint_text.py --low-text 0.3         # Lower = detect fainter text
+    # Detector selection (default: dbnet)
+    uv run python inpaint_text.py --detector dbnet   # DBNet++ (recommended)
+    uv run python inpaint_text.py --detector craft   # CRAFT
+
+    # Threshold tuning (0-1, lower = more aggressive text detection)
+    uv run python inpaint_text.py --threshold 0.2    # Default, balanced
+    uv run python inpaint_text.py --threshold 0.1    # Aggressive (more text detected)
+    uv run python inpaint_text.py --threshold 0.5    # Conservative (less text)
 """
 
 import argparse
 from pathlib import Path
-import json
 
 import cv2
 import numpy as np
@@ -29,175 +32,11 @@ from PIL import Image
 DEFAULT_INPUT = Path(__file__).parent.parent / "media" / "p2-mono.png"
 DEFAULT_OUTPUT = Path(__file__).parent / "inpainted.png"
 
-# Default OCR parameters
-DEFAULT_TEXT_THRESHOLD = 0.7
-DEFAULT_LINK_THRESHOLD = 0.1
-DEFAULT_LOW_TEXT = 0.4
+# Default detector
+DEFAULT_DETECTOR = "dbnet"
 
-
-def get_cache_path(image_path: Path) -> Path:
-    """Get cache file path for OCR results."""
-    return image_path.with_suffix(image_path.suffix + '.ocr_cache.json')
-
-
-def load_ocr_cache(cache_path: Path, image_path: Path, params: dict) -> tuple[list, list] | None:
-    """Load OCR results from cache if valid and params match."""
-    if not cache_path.exists():
-        return None
-
-    if image_path.stat().st_mtime > cache_path.stat().st_mtime:
-        print("OCR cache is stale - will regenerate")
-        return None
-
-    try:
-        with open(cache_path, 'r') as f:
-            data = json.load(f)
-
-        # Check if cached params match current params
-        cached_params = data.get('params', {})
-        if cached_params != params:
-            print("OCR cache params don't match - will regenerate")
-            return None
-
-        print(f"Loaded OCR cache from {cache_path}")
-        return data['horizontal'], data['free']
-    except (json.JSONDecodeError, KeyError) as e:
-        print(f"OCR cache invalid ({e}) - will regenerate")
-        return None
-
-
-def save_ocr_cache(cache_path: Path, horizontal: list, free: list, params: dict):
-    """Save OCR results to cache."""
-    data = {'horizontal': horizontal, 'free': free, 'params': params}
-    with open(cache_path, 'w') as f:
-        json.dump(data, f)
-    print(f"Saved OCR cache to {cache_path}")
-
-
-def detect_text_regions(
-    image_path: Path,
-    text_threshold: float = DEFAULT_TEXT_THRESHOLD,
-    link_threshold: float = DEFAULT_LINK_THRESHOLD,
-    low_text: float = DEFAULT_LOW_TEXT,
-) -> tuple[list, list]:
-    """
-    Run EasyOCR to detect text regions.
-
-    Args:
-        image_path: Path to the input image
-        text_threshold: Text confidence threshold (lower = more sensitive)
-        link_threshold: Link threshold for grouping characters (lower = more grouping)
-        low_text: Low text threshold (lower = detect fainter text)
-
-    Returns:
-        tuple: (horizontal_boxes, free_boxes)
-            - horizontal_boxes: [[x_min, x_max, y_min, y_max], ...]
-            - free_boxes: [[[x1,y1], [x2,y2], [x3,y3], [x4,y4]], ...]
-    """
-    import easyocr
-
-    params = {
-        'text_threshold': text_threshold,
-        'link_threshold': link_threshold,
-        'low_text': low_text,
-    }
-
-    cache_path = get_cache_path(image_path)
-    cached = load_ocr_cache(cache_path, image_path, params)
-
-    if cached is not None:
-        return cached
-
-    # Check for GPU
-    use_gpu = False
-    if torch.backends.mps.is_available():
-        print("MPS (Metal) GPU detected - enabling GPU acceleration")
-        use_gpu = True
-    elif torch.cuda.is_available():
-        print("CUDA GPU detected - enabling GPU acceleration")
-        use_gpu = True
-    else:
-        print("No GPU available - using CPU")
-
-    print("Initializing EasyOCR...")
-    reader = easyocr.Reader(['en'], gpu=use_gpu)
-
-    with Image.open(image_path) as img:
-        width, height = img.size
-
-    print(f"Running text detection on {image_path.name} ({width}x{height})...")
-    print(f"  text_threshold={text_threshold}, link_threshold={link_threshold}, low_text={low_text}")
-
-    horizontal_boxes, free_boxes = reader.detect(
-        str(image_path),
-        text_threshold=text_threshold,
-        link_threshold=link_threshold,
-        low_text=low_text,
-        canvas_size=max(width, height),
-    )
-
-    raw_horizontal = []
-    raw_free = []
-
-    # Extract horizontal boxes [x_min, x_max, y_min, y_max]
-    if horizontal_boxes and len(horizontal_boxes[0]) > 0:
-        for box in horizontal_boxes[0]:
-            x_min, x_max, y_min, y_max = box
-            raw_horizontal.append([float(x_min), float(x_max), float(y_min), float(y_max)])
-
-    # Extract free-form boxes [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-    if free_boxes and len(free_boxes[0]) > 0:
-        for box in free_boxes[0]:
-            coords = [[float(pt[0]), float(pt[1])] for pt in box]
-            raw_free.append(coords)
-
-    save_ocr_cache(cache_path, raw_horizontal, raw_free, params)
-
-    print(f"Detected {len(raw_horizontal)} horizontal + {len(raw_free)} free-form text regions")
-    return raw_horizontal, raw_free
-
-
-def create_text_mask(
-    image_shape: tuple[int, int],
-    horizontal_boxes: list,
-    free_boxes: list,
-    expand_pixels: int = 3
-) -> np.ndarray:
-    """
-    Create a binary mask where text regions are white (255).
-
-    Args:
-        image_shape: (height, width) of the image
-        horizontal_boxes: List of [x_min, x_max, y_min, y_max]
-        free_boxes: List of [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-        expand_pixels: Number of pixels to expand the mask by (dilation)
-
-    Returns:
-        Binary mask (uint8) with text regions as 255
-    """
-    height, width = image_shape
-    mask = np.zeros((height, width), dtype=np.uint8)
-
-    # Draw horizontal boxes
-    for x_min, x_max, y_min, y_max in horizontal_boxes:
-        x1, x2 = int(x_min), int(x_max)
-        y1, y2 = int(y_min), int(y_max)
-        cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
-
-    # Draw free-form boxes as filled polygons
-    for coords in free_boxes:
-        pts = np.array([[int(x), int(y)] for x, y in coords], dtype=np.int32)
-        cv2.fillPoly(mask, [pts], 255)
-
-    # Expand mask by dilation
-    if expand_pixels > 0:
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE,
-            (expand_pixels * 2 + 1, expand_pixels * 2 + 1)
-        )
-        mask = cv2.dilate(mask, kernel)
-
-    return mask
+# Default threshold for pixel-level detectors
+DEFAULT_THRESHOLD = 0.2
 
 
 def get_device() -> torch.device:
@@ -207,6 +46,187 @@ def get_device() -> torch.device:
     elif torch.cuda.is_available():
         return torch.device("cuda")
     return torch.device("cpu")
+
+
+def detect_text_dbnet(image_path: Path, threshold: float = DEFAULT_THRESHOLD) -> np.ndarray:
+    """
+    Detect text using DBNet++ and return a binary mask.
+
+    Args:
+        image_path: Path to the input image
+        threshold: Detection threshold (0-1, lower = more aggressive)
+
+    Returns:
+        Binary mask (uint8) with text pixels as 255
+    """
+    from doctr.models import detection_predictor
+    from torchvision import transforms
+
+    device = get_device()
+    print(f"Loading DBNet++ model on {device}...")
+
+    predictor = detection_predictor(
+        arch='db_resnet50',
+        pretrained=True,
+        assume_straight_pages=True,
+        preserve_aspect_ratio=True,
+    )
+    model = predictor.model.to(device)
+    model.eval()
+
+    # Load and prepare image
+    image_bgr = cv2.imread(str(image_path))
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    height, width = image_rgb.shape[:2]
+
+    # Preprocessing transform
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+
+    # Resize to make dimensions divisible by 32 (model requirement)
+    max_size = 2048
+    scale = min(max_size / height, max_size / width, 1.0)
+    new_h = ((int(height * scale) + 31) // 32) * 32
+    new_w = ((int(width * scale) + 31) // 32) * 32
+
+    resized = cv2.resize(image_rgb, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    img_tensor = transform(resized).unsqueeze(0).to(device)
+
+    print(f"Running DBNet++ detection (threshold={threshold})...")
+
+    with torch.inference_mode():
+        feats = model.feat_extractor(img_tensor)
+        feats_list = [feats[str(i)] for i in range(len(feats))]
+        fpn_out = model.fpn(feats_list)
+        logits = model.prob_head(fpn_out)
+        prob_map = torch.sigmoid(logits)
+
+    # Convert to numpy and resize back
+    prob_map = prob_map.squeeze().cpu().numpy()
+    prob_map = cv2.resize(prob_map, (width, height), interpolation=cv2.INTER_LINEAR)
+
+    print(f"Probability range: [{prob_map.min():.4f}, {prob_map.max():.4f}]")
+
+    # Apply threshold to create binary mask
+    mask = ((prob_map >= threshold) * 255).astype(np.uint8)
+
+    pixel_count = np.count_nonzero(mask)
+    print(f"Detected {pixel_count:,} text pixels ({pixel_count / (width * height) * 100:.2f}%)")
+
+    return mask
+
+
+def detect_text_craft(image_path: Path, threshold: float = DEFAULT_THRESHOLD) -> np.ndarray:
+    """
+    Detect text using CRAFT and return a binary mask.
+
+    Args:
+        image_path: Path to the input image
+        threshold: Detection threshold (0-1, lower = more aggressive)
+
+    Returns:
+        Binary mask (uint8) with text pixels as 255
+    """
+    from craft_text_detector import Craft
+
+    device = get_device()
+    device_str = str(device)
+    # CRAFT uses 'cuda' string, not 'mps'
+    cuda = device_str == "cuda"
+
+    print(f"Loading CRAFT model (cuda={cuda})...")
+
+    # Initialize CRAFT detector
+    craft = Craft(
+        output_dir=None,  # Don't save outputs
+        crop_type="poly",
+        cuda=cuda,
+        text_threshold=threshold,
+        link_threshold=threshold * 0.5,  # Link threshold typically lower
+        low_text=threshold * 0.7,
+    )
+
+    # Load image
+    image_bgr = cv2.imread(str(image_path))
+    height, width = image_bgr.shape[:2]
+
+    print(f"Running CRAFT detection (threshold={threshold})...")
+
+    # Run detection to get heatmaps
+    prediction_result = craft.detect_text(str(image_path))
+
+    # Get the text score heatmap
+    heatmaps = prediction_result["heatmaps"]
+    text_score = heatmaps["text_score_heatmap"]
+
+    # The heatmap is already normalized 0-255, convert to 0-1
+    if text_score.max() > 1:
+        text_score = text_score / 255.0
+
+    # Resize to original image size if needed
+    if text_score.shape[:2] != (height, width):
+        text_score = cv2.resize(text_score, (width, height), interpolation=cv2.INTER_LINEAR)
+
+    print(f"Heatmap range: [{text_score.min():.4f}, {text_score.max():.4f}]")
+
+    # Apply threshold to create binary mask
+    mask = ((text_score >= threshold) * 255).astype(np.uint8)
+
+    # Cleanup CRAFT resources
+    craft.unload_craftnet_model()
+    craft.unload_refinenet_model()
+
+    pixel_count = np.count_nonzero(mask)
+    print(f"Detected {pixel_count:,} text pixels ({pixel_count / (width * height) * 100:.2f}%)")
+
+    return mask
+
+
+def detect_text(
+    image_path: Path,
+    detector: str = DEFAULT_DETECTOR,
+    threshold: float = DEFAULT_THRESHOLD
+) -> np.ndarray:
+    """
+    Detect text using the specified detector.
+
+    Args:
+        image_path: Path to the input image
+        detector: Detector to use ('dbnet' or 'craft')
+        threshold: Detection threshold (0-1, lower = more aggressive)
+
+    Returns:
+        Binary mask (uint8) with text pixels as 255
+    """
+    if detector == "dbnet":
+        return detect_text_dbnet(image_path, threshold)
+    elif detector == "craft":
+        return detect_text_craft(image_path, threshold)
+    else:
+        raise ValueError(f"Unknown detector: {detector}. Use 'dbnet' or 'craft'.")
+
+
+def expand_mask(mask: np.ndarray, expand_pixels: int) -> np.ndarray:
+    """
+    Expand a binary mask by dilation.
+
+    Args:
+        mask: Binary mask (uint8)
+        expand_pixels: Number of pixels to expand by
+
+    Returns:
+        Expanded mask
+    """
+    if expand_pixels <= 0:
+        return mask
+
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (expand_pixels * 2 + 1, expand_pixels * 2 + 1)
+    )
+    return cv2.dilate(mask, kernel)
 
 
 def load_lama_model(device: torch.device):
@@ -264,7 +284,7 @@ def inpaint_lama(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description='Detect and remove text from images using EasyOCR + LaMa inpainting.',
+        description='Detect and remove text from images using DBNet++/CRAFT + LaMa inpainting.',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument(
@@ -286,30 +306,20 @@ def parse_args() -> argparse.Namespace:
         help='Pixels to expand text mask by (dilation)'
     )
 
-    # OCR tuning parameters
-    ocr_group = parser.add_argument_group('OCR tuning')
-    ocr_group.add_argument(
-        '--text-threshold',
-        type=float,
-        default=DEFAULT_TEXT_THRESHOLD,
-        help='Text confidence threshold (lower = more sensitive, range 0-1)'
+    # Detector selection
+    detector_group = parser.add_argument_group('Detector options')
+    detector_group.add_argument(
+        '--detector',
+        type=str,
+        choices=['dbnet', 'craft'],
+        default=DEFAULT_DETECTOR,
+        help='Text detection model to use'
     )
-    ocr_group.add_argument(
-        '--link-threshold',
+    detector_group.add_argument(
+        '-t', '--threshold',
         type=float,
-        default=DEFAULT_LINK_THRESHOLD,
-        help='Link threshold for character grouping (lower = more grouping, range 0-1)'
-    )
-    ocr_group.add_argument(
-        '--low-text',
-        type=float,
-        default=DEFAULT_LOW_TEXT,
-        help='Low text threshold (lower = detect fainter text, range 0-1)'
-    )
-    ocr_group.add_argument(
-        '--no-cache',
-        action='store_true',
-        help='Ignore OCR cache and re-run detection'
+        default=DEFAULT_THRESHOLD,
+        help='Detection threshold (0-1, lower = more aggressive text detection)'
     )
 
     # Debug options
@@ -321,10 +331,9 @@ def parse_args() -> argparse.Namespace:
         help='Save the text mask image to this path'
     )
     debug_group.add_argument(
-        '--save-debug',
-        type=Path,
-        default=None,
-        help='Save debug image with detected boxes to this path'
+        '--mask-only',
+        action='store_true',
+        help='Only generate the mask, skip inpainting'
     )
 
     return parser.parse_args()
@@ -335,15 +344,10 @@ def main():
 
     print(f"Input: {args.input}")
     print(f"Output: {args.output}")
+    print(f"Detector: {args.detector}")
+    print(f"Threshold: {args.threshold}")
     print(f"Mask expansion: {args.expand}px")
     print()
-
-    # Delete cache if --no-cache specified
-    if args.no_cache:
-        cache_path = get_cache_path(args.input)
-        if cache_path.exists():
-            cache_path.unlink()
-            print(f"Deleted OCR cache: {cache_path}")
 
     # Load image
     image = cv2.imread(str(args.input))
@@ -354,43 +358,36 @@ def main():
     height, width = image.shape[:2]
     print(f"Image size: {width}x{height}")
 
-    # Detect text regions
-    horizontal_boxes, free_boxes = detect_text_regions(
-        args.input,
-        text_threshold=args.text_threshold,
-        link_threshold=args.link_threshold,
-        low_text=args.low_text,
-    )
-    total_regions = len(horizontal_boxes) + len(free_boxes)
+    # Detect text and create mask
+    mask = detect_text(args.input, args.detector, args.threshold)
 
-    if total_regions == 0:
-        print("No text detected - copying input to output")
-        cv2.imwrite(str(args.output), image)
-        return 0
+    # Expand mask if requested
+    if args.expand > 0:
+        print(f"\nExpanding mask by {args.expand}px...")
+        mask = expand_mask(mask, args.expand)
 
-    # Create mask
-    print(f"\nCreating text mask...")
-    mask = create_text_mask((height, width), horizontal_boxes, free_boxes, args.expand)
     mask_coverage = np.count_nonzero(mask) / (width * height) * 100
-    print(f"Mask coverage: {mask_coverage:.2f}%")
+    print(f"Final mask coverage: {mask_coverage:.2f}%")
 
     # Save mask if requested
     if args.save_mask:
         cv2.imwrite(str(args.save_mask), mask)
         print(f"Saved mask to {args.save_mask}")
 
-    # Save debug image if requested
-    if args.save_debug:
-        debug_img = image.copy()
-        # Draw horizontal boxes in red
-        for x_min, x_max, y_min, y_max in horizontal_boxes:
-            cv2.rectangle(debug_img, (int(x_min), int(y_min)), (int(x_max), int(y_max)), (0, 0, 255), 2)
-        # Draw free-form boxes in blue
-        for coords in free_boxes:
-            pts = np.array([[int(x), int(y)] for x, y in coords], dtype=np.int32)
-            cv2.polylines(debug_img, [pts], True, (255, 0, 0), 2)
-        cv2.imwrite(str(args.save_debug), debug_img)
-        print(f"Saved debug image to {args.save_debug}")
+    # If mask-only mode, we're done
+    if args.mask_only:
+        if not args.save_mask:
+            # Default to saving mask with output path
+            cv2.imwrite(str(args.output), mask)
+            print(f"Saved mask to {args.output}")
+        print("Done (mask-only mode)!")
+        return 0
+
+    # Check if there's anything to inpaint
+    if np.count_nonzero(mask) == 0:
+        print("No text detected - copying input to output")
+        cv2.imwrite(str(args.output), image)
+        return 0
 
     # Inpaint with LaMa
     print(f"\nInpainting with LaMa...")
