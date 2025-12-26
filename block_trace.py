@@ -36,7 +36,7 @@ import torch
 import easyocr
 
 # Paths
-INPUT_SVG = Path(__file__).parent.parent.parent / "media" / "p2.svg"
+INPUT_SVG = Path(__file__).parent.parent / "media" / "p2.svg"
 OUTPUT_SVG = Path(__file__).parent / "blocktraced.svg"
 
 # SVG namespace
@@ -380,6 +380,90 @@ def subpaths_to_path_string(subpaths: list[list]) -> str:
     return " ".join(subpath_to_path_string(sp) for sp in subpaths)
 
 
+def subpath_to_linestring(subpath_segments: list) -> LineString:
+    """Convert a subpath (list of segments) to a Shapely LineString."""
+    if not subpath_segments:
+        return LineString()
+    coords = []
+    for seg in subpath_segments:
+        coords.append((seg.start.real, seg.start.imag))
+    coords.append((subpath_segments[-1].end.real, subpath_segments[-1].end.imag))
+    return LineString(coords)
+
+
+def linestring_to_segments(ls) -> list:
+    """Convert Shapely LineString/LinearRing back to svgpathtools Line segments."""
+    if ls.is_empty:
+        return []
+    coords = list(ls.coords)
+    result = []
+    for i in range(len(coords) - 1):
+        x1, y1 = coords[i]
+        x2, y2 = coords[i + 1]
+        result.append(Line(complex(x1, y1), complex(x2, y2)))
+    return result
+
+
+def smooth_subpath(subpath_segments: list, buffer_radius: float, simplify_tolerance: float) -> list:
+    """
+    Smooth a subpath using buffer shrink-expand and Douglas-Peucker simplification.
+
+    Buffer shrink-expand (morphological opening) removes protrusions smaller than 2*buffer_radius.
+    Simplify reduces vertex count while preserving shape within tolerance.
+    """
+    if not subpath_segments or len(subpath_segments) < 2:
+        return subpath_segments
+
+    ls = subpath_to_linestring(subpath_segments)
+
+    # Check if path forms a closed loop
+    first_pt = subpath_segments[0].start
+    last_pt = subpath_segments[-1].end
+    is_closed = abs(last_pt - first_pt) < 0.5
+
+    if is_closed:
+        # For closed paths, convert to Polygon for buffer operations
+        poly = Polygon(ls.coords)
+        if not poly.is_valid:
+            poly = poly.buffer(0)  # Fix invalid geometry
+
+        # Morphological opening: shrink then expand
+        if buffer_radius > 0:
+            smoothed = poly.buffer(-buffer_radius).buffer(buffer_radius)
+        else:
+            smoothed = poly
+
+        # Simplify
+        if simplify_tolerance > 0:
+            smoothed = smoothed.simplify(simplify_tolerance, preserve_topology=True)
+
+        if smoothed.is_empty:
+            return []
+
+        # Handle different geometry types
+        if smoothed.geom_type == 'Polygon':
+            return linestring_to_segments(smoothed.exterior)
+        elif smoothed.geom_type == 'MultiPolygon':
+            # Take the largest polygon by area
+            largest = max(smoothed.geoms, key=lambda g: g.area)
+            return linestring_to_segments(largest.exterior)
+        else:
+            # Geometry collapsed or changed type, return empty
+            return []
+    else:
+        # For open paths, just simplify (buffer creates weird results on lines)
+        if simplify_tolerance > 0:
+            ls = ls.simplify(simplify_tolerance, preserve_topology=True)
+        if ls.geom_type == 'LineString':
+            return linestring_to_segments(ls)
+        elif ls.geom_type == 'MultiLineString':
+            # Take the longest line
+            longest = max(ls.geoms, key=lambda g: g.length)
+            return linestring_to_segments(longest)
+        else:
+            return []
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
@@ -409,6 +493,23 @@ def parse_args() -> argparse.Namespace:
         '--no-size-filter',
         action='store_true',
         help='Disable minimum size filtering (keep all paths regardless of size)'
+    )
+    parser.add_argument(
+        '--buffer-radius',
+        type=float,
+        default=2.0,
+        help='Buffer radius for morphological smoothing (pixels); removes features smaller than 2*radius'
+    )
+    parser.add_argument(
+        '--simplify-tolerance',
+        type=float,
+        default=1.0,
+        help='Simplify tolerance for Douglas-Peucker (pixels); higher = more aggressive'
+    )
+    parser.add_argument(
+        '--no-smoothing',
+        action='store_true',
+        help='Disable path smoothing'
     )
     return parser.parse_args()
 
@@ -523,6 +624,15 @@ def main():
 
         # Group into subpaths
         subpaths = group_segments_into_subpaths(clipped_segments)
+
+        # Smooth subpaths to remove text remnants
+        if not args.no_smoothing:
+            smoothed_subpaths = []
+            for subpath in subpaths:
+                smoothed = smooth_subpath(subpath, args.buffer_radius, args.simplify_tolerance)
+                if smoothed:
+                    smoothed_subpaths.append(smoothed)
+            subpaths = smoothed_subpaths
 
         # Classify subpaths
         autotrace_subpaths = []
