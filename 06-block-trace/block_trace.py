@@ -24,12 +24,14 @@ Output: SVG file with hierarchical structure:
 """
 
 import sys
+import json
 from pathlib import Path
 from lxml import etree
 from svgpathtools import parse_path, Path as SvgPath, Line
 from shapely.geometry import Polygon, Point, LineString, box as shapely_box
 from shapely.ops import split
 from PIL import Image
+import torch
 import easyocr
 
 # Paths
@@ -81,39 +83,108 @@ def extract_image_path_from_svg(svg_path: Path, root) -> Path:
     return image_path
 
 
-def detect_text_regions(image_path: Path) -> list[Polygon]:
-    """Run EasyOCR detection and return text bounding boxes as Shapely polygons."""
-    print("Initializing EasyOCR...")
-    reader = easyocr.Reader(['en'], gpu=False)
+def get_ocr_cache_path(svg_path: Path) -> Path:
+    """Get the cache file path for OCR results (beside the source SVG)."""
+    return svg_path.with_suffix(svg_path.suffix + '.ocr_cache.json')
 
-    with Image.open(image_path) as img:
-        width, height = img.size
 
-    print(f"Running text detection (link_threshold={LINK_THRESHOLD})...")
-    horizontal_boxes, free_boxes = reader.detect(
-        str(image_path),
-        text_threshold=TEXT_THRESHOLD,
-        link_threshold=LINK_THRESHOLD,
-        low_text=LOW_TEXT,
-        canvas_size=max(width, height),
-    )
+def load_ocr_cache(cache_path: Path, image_path: Path) -> tuple[list, list] | None:
+    """Load OCR results from cache if valid (cache newer than image)."""
+    if not cache_path.exists():
+        return None
 
+    # Check if cache is stale (image modified after cache)
+    if image_path.stat().st_mtime > cache_path.stat().st_mtime:
+        print("OCR cache is stale (image modified) - will regenerate")
+        return None
+
+    try:
+        with open(cache_path, 'r') as f:
+            data = json.load(f)
+        print(f"Loaded OCR cache from {cache_path}")
+        return data['horizontal'], data['free']
+    except (json.JSONDecodeError, KeyError) as e:
+        print(f"OCR cache invalid ({e}) - will regenerate")
+        return None
+
+
+def save_ocr_cache(cache_path: Path, horizontal: list, free: list):
+    """Save OCR results to cache file."""
+    data = {'horizontal': horizontal, 'free': free}
+    with open(cache_path, 'w') as f:
+        json.dump(data, f)
+    print(f"Saved OCR cache to {cache_path}")
+
+
+def detect_text_regions(image_path: Path, svg_path: Path) -> tuple[list[Polygon], list, list]:
+    """Run EasyOCR detection and return text bounding boxes as Shapely polygons.
+
+    Uses a cache file beside the source SVG to avoid re-running OCR on every invocation.
+
+    Returns:
+        tuple: (text_polygons, horizontal_boxes, free_boxes)
+            - text_polygons: Shapely polygon objects for clipping
+            - horizontal_boxes: Raw horizontal box data [x_min, x_max, y_min, y_max]
+            - free_boxes: Raw free-form box data [[x1,y1], ...]
+    """
+    cache_path = get_ocr_cache_path(svg_path)
+    cached = load_ocr_cache(cache_path, image_path)
+
+    if cached is not None:
+        raw_horizontal, raw_free = cached
+    else:
+        # Check for GPU availability (MPS on Mac, CUDA elsewhere)
+        use_gpu = False
+        if torch.backends.mps.is_available():
+            print("MPS (Metal) GPU detected - enabling GPU acceleration")
+            use_gpu = True
+        elif torch.cuda.is_available():
+            print("CUDA GPU detected - enabling GPU acceleration")
+            use_gpu = True
+        else:
+            print("No GPU available - using CPU")
+
+        print("Initializing EasyOCR...")
+        reader = easyocr.Reader(['en'], gpu=use_gpu)
+
+        with Image.open(image_path) as img:
+            width, height = img.size
+
+        print(f"Running text detection (link_threshold={LINK_THRESHOLD})...")
+        horizontal_boxes, free_boxes = reader.detect(
+            str(image_path),
+            text_threshold=TEXT_THRESHOLD,
+            link_threshold=LINK_THRESHOLD,
+            low_text=LOW_TEXT,
+            canvas_size=max(width, height),
+        )
+
+        raw_horizontal = []
+        raw_free = []
+
+        # Extract horizontal boxes [x_min, x_max, y_min, y_max]
+        if horizontal_boxes and len(horizontal_boxes[0]) > 0:
+            for box in horizontal_boxes[0]:
+                x_min, x_max, y_min, y_max = box
+                raw_horizontal.append([float(x_min), float(x_max), float(y_min), float(y_max)])
+
+        # Extract free-form boxes [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+        if free_boxes and len(free_boxes[0]) > 0:
+            for box in free_boxes[0]:
+                coords = [[float(pt[0]), float(pt[1])] for pt in box]
+                raw_free.append(coords)
+
+        save_ocr_cache(cache_path, raw_horizontal, raw_free)
+
+    # Convert to Shapely polygons
     text_polygons = []
-
-    # Convert horizontal boxes [x_min, x_max, y_min, y_max] to polygons
-    if horizontal_boxes and len(horizontal_boxes[0]) > 0:
-        for box in horizontal_boxes[0]:
-            x_min, x_max, y_min, y_max = box
-            text_polygons.append(shapely_box(x_min, y_min, x_max, y_max))
-
-    # Convert free-form boxes [[x1,y1], [x2,y2], [x3,y3], [x4,y4]] to polygons
-    if free_boxes and len(free_boxes[0]) > 0:
-        for box in free_boxes[0]:
-            coords = [(pt[0], pt[1]) for pt in box]
-            text_polygons.append(Polygon(coords))
+    for x_min, x_max, y_min, y_max in raw_horizontal:
+        text_polygons.append(shapely_box(x_min, y_min, x_max, y_max))
+    for coords in raw_free:
+        text_polygons.append(Polygon(coords))
 
     print(f"Detected {len(text_polygons)} text regions")
-    return text_polygons
+    return text_polygons, raw_horizontal, raw_free
 
 
 def segment_to_linestring(segment, num_samples: int = CURVE_SAMPLES) -> LineString:
@@ -295,6 +366,42 @@ def subpaths_to_path_string(subpaths: list[list]) -> str:
     return " ".join(subpath_to_path_string(sp) for sp in subpaths)
 
 
+def add_ocr_bounds_to_svg(root, horizontal_boxes: list, free_boxes: list):
+    """Add EasyOCR bounding boxes to SVG as a reference group."""
+    ocr_group = etree.SubElement(root, f'{{{SVG_NS}}}g', id='ocr-text-bounds')
+    ocr_group.set('visibility', 'hidden')
+
+    # Add horizontal boxes as rectangles
+    for i, (x_min, x_max, y_min, y_max) in enumerate(horizontal_boxes):
+        rect_attribs = {
+            'id': f'ocr-h{i+1:04d}',
+            'x': str(x_min),
+            'y': str(y_min),
+            'width': str(x_max - x_min),
+            'height': str(y_max - y_min),
+            'fill': 'none',
+            'stroke': '#ff00ff',
+            'stroke-width': '1',
+            'stroke-opacity': '0.5',
+        }
+        etree.SubElement(ocr_group, f'{{{SVG_NS}}}rect', **rect_attribs)
+
+    # Add free-form boxes as polygons
+    for i, coords in enumerate(free_boxes):
+        points_str = ' '.join(f'{x},{y}' for x, y in coords)
+        poly_attribs = {
+            'id': f'ocr-f{i+1:04d}',
+            'points': points_str,
+            'fill': 'none',
+            'stroke': '#ff00ff',
+            'stroke-width': '1',
+            'stroke-opacity': '0.5',
+        }
+        etree.SubElement(ocr_group, f'{{{SVG_NS}}}polygon', **poly_attribs)
+
+    print(f"Added {len(horizontal_boxes)} horizontal + {len(free_boxes)} free-form OCR bounds to SVG")
+
+
 def main():
     print(f"Loading SVG: {INPUT_SVG}")
 
@@ -306,7 +413,10 @@ def main():
     # Extract image and run text detection
     image_path = extract_image_path_from_svg(INPUT_SVG, root)
     print(f"Image path: {image_path}")
-    text_boxes = detect_text_regions(image_path)
+    text_boxes, raw_horizontal, raw_free = detect_text_regions(image_path, INPUT_SVG)
+
+    # Add OCR bounding boxes to SVG for reference
+    add_ocr_bounds_to_svg(root, raw_horizontal, raw_free)
 
     # Find autotrace path
     path_elem = root.find(f'.//{{{SVG_NS}}}path')
@@ -389,10 +499,10 @@ def main():
             }
             etree.SubElement(block_group, f'{{{SVG_NS}}}path', **path_attribs)
 
-        # Create hidden text group
-        text_group = etree.SubElement(block_group, f'{{{SVG_NS}}}g', id='text', visibility='hidden')
+        # Create text group (visible, but individual paths hidden)
+        text_group = etree.SubElement(block_group, f'{{{SVG_NS}}}g', id='text')
 
-        # Add text paths
+        # Add text paths (each individually hidden)
         for i, text_subpath in enumerate(text_subpaths):
             text_d = subpath_to_path_string(text_subpath)
             text_attribs = {
@@ -401,6 +511,7 @@ def main():
                 'fill': 'none',
                 'stroke': stroke_color,
                 'stroke-width': '2',
+                'visibility': 'hidden',
             }
             etree.SubElement(text_group, f'{{{SVG_NS}}}path', **text_attribs)
 

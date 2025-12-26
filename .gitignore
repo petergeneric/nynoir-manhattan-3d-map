@@ -6,3 +6,5 @@ __pycache__/
 *.jp2
 *.png
 *.svg
+.idea/
+
