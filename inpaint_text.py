@@ -129,54 +129,61 @@ def detect_text_craft(image_path: Path, threshold: float = DEFAULT_THRESHOLD) ->
     Returns:
         Binary mask (uint8) with text pixels as 255
     """
-    from craft_text_detector import Craft
+    # Patch torchvision for craft_text_detector compatibility (model_urls removed in 0.13+)
+    import torchvision.models.vgg as vgg_module
+    if not hasattr(vgg_module, 'model_urls'):
+        vgg_module.model_urls = {
+            'vgg16_bn': 'https://download.pytorch.org/models/vgg16_bn-6c64b313.pth',
+        }
+
+    from craft_text_detector.craft_utils import load_craftnet_model
+    import craft_text_detector.image_utils as craft_image_utils
+    import craft_text_detector.torch_utils as craft_torch_utils
 
     device = get_device()
-    device_str = str(device)
-    # CRAFT uses 'cuda' string, not 'mps'
-    cuda = device_str == "cuda"
+    # CRAFT only supports CUDA or CPU, not MPS
+    use_cuda = device.type == "cuda"
+    run_device = "cuda" if use_cuda else "cpu"
 
-    print(f"Loading CRAFT model (cuda={cuda})...")
+    print(f"Loading CRAFT model on {run_device}...")
 
-    # Initialize CRAFT detector
-    craft = Craft(
-        output_dir=None,  # Don't save outputs
-        crop_type="poly",
-        cuda=cuda,
-        text_threshold=threshold,
-        link_threshold=threshold * 0.5,  # Link threshold typically lower
-        low_text=threshold * 0.7,
-    )
+    # Load CRAFT model directly
+    craft_net = load_craftnet_model(cuda=use_cuda)
 
-    # Load image
+    # Load and prepare image
     image_bgr = cv2.imread(str(image_path))
-    height, width = image_bgr.shape[:2]
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    height, width = image_rgb.shape[:2]
 
     print(f"Running CRAFT detection (threshold={threshold})...")
 
-    # Run detection to get heatmaps
-    prediction_result = craft.detect_text(str(image_path))
+    # Resize for model (same as craft_text_detector does internally)
+    long_size = 1280
+    img_resized, target_ratio, size_heatmap = craft_image_utils.resize_aspect_ratio(
+        image_rgb, long_size, interpolation=cv2.INTER_LINEAR
+    )
 
-    # Get the text score heatmap
-    heatmaps = prediction_result["heatmaps"]
-    text_score = heatmaps["text_score_heatmap"]
+    # Preprocessing
+    x = craft_image_utils.normalizeMeanVariance(img_resized)
+    x = craft_torch_utils.from_numpy(x).permute(2, 0, 1)  # [h, w, c] to [c, h, w]
+    x = craft_torch_utils.Variable(x.unsqueeze(0))  # [c, h, w] to [b, c, h, w]
+    if use_cuda:
+        x = x.cuda()
 
-    # The heatmap is already normalized 0-255, convert to 0-1
-    if text_score.max() > 1:
-        text_score = text_score / 255.0
+    # Forward pass - get raw score maps
+    with craft_torch_utils.no_grad():
+        y, _ = craft_net(x)
 
-    # Resize to original image size if needed
-    if text_score.shape[:2] != (height, width):
-        text_score = cv2.resize(text_score, (width, height), interpolation=cv2.INTER_LINEAR)
+    # Extract text score map (character heatmap)
+    score_text = y[0, :, :, 0].cpu().data.numpy()
 
-    print(f"Heatmap range: [{text_score.min():.4f}, {text_score.max():.4f}]")
+    # Resize score map back to original image size
+    score_text = cv2.resize(score_text, (width, height), interpolation=cv2.INTER_LINEAR)
+
+    print(f"Score range: [{score_text.min():.4f}, {score_text.max():.4f}]")
 
     # Apply threshold to create binary mask
-    mask = ((text_score >= threshold) * 255).astype(np.uint8)
-
-    # Cleanup CRAFT resources
-    craft.unload_craftnet_model()
-    craft.unload_refinenet_model()
+    mask = ((score_text >= threshold) * 255).astype(np.uint8)
 
     pixel_count = np.count_nonzero(mask)
     print(f"Detected {pixel_count:,} text pixels ({pixel_count / (width * height) * 100:.2f}%)")
