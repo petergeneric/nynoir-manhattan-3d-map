@@ -2,17 +2,13 @@
 """
 Text Detection and Inpainting
 
-Detects text regions using DBNet++ or CRAFT pixel-level detectors, then uses LaMa
+Detects text regions using DBNet++ pixel-level detector, then uses LaMa
 (Large Mask Inpainting) to remove the text and fill in the background.
 
 Usage:
     uv run python inpaint_text.py
     uv run python inpaint_text.py -i /path/to/input.png -o /path/to/output.png
     uv run python inpaint_text.py --expand 5      # Expand mask by 5 pixels
-
-    # Detector selection (default: dbnet)
-    uv run python inpaint_text.py --detector dbnet   # DBNet++ (recommended)
-    uv run python inpaint_text.py --detector craft   # CRAFT
 
     # Threshold tuning (0-1, lower = more aggressive text detection)
     uv run python inpaint_text.py --threshold 0.2    # Default, balanced
@@ -32,10 +28,7 @@ from PIL import Image
 DEFAULT_INPUT = Path(__file__).parent.parent / "media" / "p2-mono.png"
 DEFAULT_OUTPUT = Path(__file__).parent / "inpainted.png"
 
-# Default detector
-DEFAULT_DETECTOR = "dbnet"
-
-# Default threshold for pixel-level detectors
+# Default threshold for text detection
 DEFAULT_THRESHOLD = 0.2
 
 
@@ -118,9 +111,9 @@ def detect_text_dbnet(image_path: Path, threshold: float = DEFAULT_THRESHOLD) ->
     return mask
 
 
-def detect_text_craft(image_path: Path, threshold: float = DEFAULT_THRESHOLD) -> np.ndarray:
+def detect_text(image_path: Path, threshold: float = DEFAULT_THRESHOLD) -> np.ndarray:
     """
-    Detect text using CRAFT and return a binary mask.
+    Detect text using DBNet++ and return a binary mask.
 
     Args:
         image_path: Path to the input image
@@ -129,90 +122,7 @@ def detect_text_craft(image_path: Path, threshold: float = DEFAULT_THRESHOLD) ->
     Returns:
         Binary mask (uint8) with text pixels as 255
     """
-    # Patch torchvision for craft_text_detector compatibility (model_urls removed in 0.13+)
-    import torchvision.models.vgg as vgg_module
-    if not hasattr(vgg_module, 'model_urls'):
-        vgg_module.model_urls = {
-            'vgg16_bn': 'https://download.pytorch.org/models/vgg16_bn-6c64b313.pth',
-        }
-
-    from craft_text_detector.craft_utils import load_craftnet_model
-    import craft_text_detector.image_utils as craft_image_utils
-    import craft_text_detector.torch_utils as craft_torch_utils
-
-    device = get_device()
-    # CRAFT only supports CUDA or CPU, not MPS
-    use_cuda = device.type == "cuda"
-    run_device = "cuda" if use_cuda else "cpu"
-
-    print(f"Loading CRAFT model on {run_device}...")
-
-    # Load CRAFT model directly
-    craft_net = load_craftnet_model(cuda=use_cuda)
-
-    # Load and prepare image
-    image_bgr = cv2.imread(str(image_path))
-    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-    height, width = image_rgb.shape[:2]
-
-    print(f"Running CRAFT detection (threshold={threshold})...")
-
-    # Resize for model (same as craft_text_detector does internally)
-    long_size = 1280
-    img_resized, target_ratio, size_heatmap = craft_image_utils.resize_aspect_ratio(
-        image_rgb, long_size, interpolation=cv2.INTER_LINEAR
-    )
-
-    # Preprocessing
-    x = craft_image_utils.normalizeMeanVariance(img_resized)
-    x = craft_torch_utils.from_numpy(x).permute(2, 0, 1)  # [h, w, c] to [c, h, w]
-    x = craft_torch_utils.Variable(x.unsqueeze(0))  # [c, h, w] to [b, c, h, w]
-    if use_cuda:
-        x = x.cuda()
-
-    # Forward pass - get raw score maps
-    with craft_torch_utils.no_grad():
-        y, _ = craft_net(x)
-
-    # Extract text score map (character heatmap)
-    score_text = y[0, :, :, 0].cpu().data.numpy()
-
-    # Resize score map back to original image size
-    score_text = cv2.resize(score_text, (width, height), interpolation=cv2.INTER_LINEAR)
-
-    print(f"Score range: [{score_text.min():.4f}, {score_text.max():.4f}]")
-
-    # Apply threshold to create binary mask
-    mask = ((score_text >= threshold) * 255).astype(np.uint8)
-
-    pixel_count = np.count_nonzero(mask)
-    print(f"Detected {pixel_count:,} text pixels ({pixel_count / (width * height) * 100:.2f}%)")
-
-    return mask
-
-
-def detect_text(
-    image_path: Path,
-    detector: str = DEFAULT_DETECTOR,
-    threshold: float = DEFAULT_THRESHOLD
-) -> np.ndarray:
-    """
-    Detect text using the specified detector.
-
-    Args:
-        image_path: Path to the input image
-        detector: Detector to use ('dbnet' or 'craft')
-        threshold: Detection threshold (0-1, lower = more aggressive)
-
-    Returns:
-        Binary mask (uint8) with text pixels as 255
-    """
-    if detector == "dbnet":
-        return detect_text_dbnet(image_path, threshold)
-    elif detector == "craft":
-        return detect_text_craft(image_path, threshold)
-    else:
-        raise ValueError(f"Unknown detector: {detector}. Use 'dbnet' or 'craft'.")
+    return detect_text_dbnet(image_path, threshold)
 
 
 def expand_mask(mask: np.ndarray, expand_pixels: int) -> np.ndarray:
@@ -291,7 +201,7 @@ def inpaint_lama(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description='Detect and remove text from images using DBNet++/CRAFT + LaMa inpainting.',
+        description='Detect and remove text from images using DBNet++ + LaMa inpainting.',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument(
@@ -312,17 +222,7 @@ def parse_args() -> argparse.Namespace:
         default=3,
         help='Pixels to expand text mask by (dilation)'
     )
-
-    # Detector selection
-    detector_group = parser.add_argument_group('Detector options')
-    detector_group.add_argument(
-        '--detector',
-        type=str,
-        choices=['dbnet', 'craft'],
-        default=DEFAULT_DETECTOR,
-        help='Text detection model to use'
-    )
-    detector_group.add_argument(
+    parser.add_argument(
         '-t', '--threshold',
         type=float,
         default=DEFAULT_THRESHOLD,
@@ -351,7 +251,6 @@ def main():
 
     print(f"Input: {args.input}")
     print(f"Output: {args.output}")
-    print(f"Detector: {args.detector}")
     print(f"Threshold: {args.threshold}")
     print(f"Mask expansion: {args.expand}px")
     print()
@@ -366,7 +265,7 @@ def main():
     print(f"Image size: {width}x{height}")
 
     # Detect text and create mask
-    mask = detect_text(args.input, args.detector, args.threshold)
+    mask = detect_text(args.input, args.threshold)
 
     # Expand mask if requested
     if args.expand > 0:
