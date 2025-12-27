@@ -1551,12 +1551,26 @@ def process_stage1(
     sam_model,
     min_block_width: int = 150,
     min_block_height: int = 150,
-    max_area_ratio: float = 0.7
+    max_area_ratio: float = 0.7,
+    scrub_text: bool = True,
+    text_threshold: float = DEFAULT_TEXT_THRESHOLD,
+    text_expand: int = DEFAULT_MASK_EXPAND
 ) -> None:
     """Stage 1: Detect blocks and output plate.svg with metadata.
 
     This generates a plate.svg file that can be manually edited before
     running Stage 2 to process individual blocks.
+
+    Args:
+        input_path: Path to source JP2/image
+        output_base: Base output directory
+        sam_model: Loaded SAM model
+        min_block_width: Minimum block width in pixels
+        min_block_height: Minimum block height in pixels
+        max_area_ratio: Maximum block area as ratio of image
+        scrub_text: If True, run text detection and inpainting before SAM
+        text_threshold: Text detection threshold (0-1, lower = more aggressive)
+        text_expand: Pixels to expand text mask by
     """
     # Determine output structure
     volume, plate_id, output_dir = get_output_structure(input_path, output_base)
@@ -1564,9 +1578,26 @@ def process_stage1(
     print(f"Stage 1: Processing plate {volume}/{plate_id}")
     print(f"Output directory: {output_dir}")
 
-    # Load full plate image
-    print("Loading plate image...")
-    image_bgr = load_image(input_path)
+    # Optionally scrub text before SAM processing
+    if scrub_text:
+        print("\n" + "=" * 50)
+        print("Running text scrubbing before SAM...")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        scrubbed_path = output_dir / "scrubbed.png"
+        scrub_result = scrub_text_from_image(
+            input_path,
+            scrubbed_path,
+            threshold=text_threshold,
+            expand_pixels=text_expand
+        )
+        source_image_path = scrub_result.scrubbed_image_path
+        print("=" * 50 + "\n")
+    else:
+        source_image_path = input_path
+
+    # Load plate image (original or scrubbed)
+    print(f"Loading plate image: {source_image_path}...")
+    image_bgr = load_image(source_image_path)
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     height, width = image_bgr.shape[:2]
     print(f"Image size: {width}x{height}")
@@ -2133,6 +2164,23 @@ def main():
         action="store_true",
         help="Force use of MPS (Apple Silicon GPU)"
     )
+    stage1_parser.add_argument(
+        "--no-scrub-text",
+        action="store_true",
+        help="Skip text removal (text scrubbing is enabled by default)"
+    )
+    stage1_parser.add_argument(
+        "--text-threshold",
+        type=float,
+        default=DEFAULT_TEXT_THRESHOLD,
+        help=f"Text detection threshold (0-1, lower = more aggressive, default: {DEFAULT_TEXT_THRESHOLD})"
+    )
+    stage1_parser.add_argument(
+        "--text-expand",
+        type=int,
+        default=0,
+        help="Pixels to expand text mask by (default: 0)"
+    )
 
     # Stage 2 subcommand (uses traditional CV, no SAM)
     stage2_parser = subparsers.add_parser(
@@ -2244,14 +2292,17 @@ def main():
             print(f"Error: Input image not found: {input_path}")
             return 1
 
-        sam = load_sam_model(force_mps=False)
+        sam = load_sam_model(force_mps=args.mps)
         process_stage1(
             input_path,
             Path(args.output_dir),
             sam,
             args.min_block_width,
             args.min_block_height,
-            args.max_area_ratio
+            args.max_area_ratio,
+            scrub_text=not args.no_scrub_text,
+            text_threshold=args.text_threshold,
+            text_expand=args.text_expand
         )
         return 0
 
