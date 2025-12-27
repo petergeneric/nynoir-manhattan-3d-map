@@ -1967,8 +1967,8 @@ def main():
     scrubtext_parser.add_argument(
         "--expand",
         type=int,
-        default=DEFAULT_MASK_EXPAND,
-        help=f"Pixels to expand text mask by (default: {DEFAULT_MASK_EXPAND})"
+        default=0,
+        help="Pixels to expand text mask by (default: 0)"
     )
 
     # Legacy mode (no subcommand) - runs both stages
