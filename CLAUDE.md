@@ -41,6 +41,18 @@ uv run python segment.py stage1 /path/to/p37.jp2 --mps
 
 # Run original single-pass mode (for comparison)
 uv run python segment.py /path/to/p37.jp2 --single-pass
+
+# Scrub text from source image (removes text via DBNet++ + LaMa inpainting)
+uv run python segment.py scrubtext output/vol1/p37/plate.svg
+
+# Stage 2 (text scrubbing is on by default)
+uv run python segment.py stage2 output/vol1/p37/plate.svg
+
+# Stage 2 without text scrubbing
+uv run python segment.py stage2 output/vol1/p37/plate.svg --no-scrub-text
+
+# Adjust text detection threshold (0-1, lower = more aggressive)
+uv run python segment.py scrubtext output/vol1/p37/plate.svg --threshold 0.2
 ```
 
 ## Workflow
@@ -146,20 +158,30 @@ Blocks are renumbered sequentially based on remaining polygons after editing.
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--mps` | false | Force MPS (Apple Silicon GPU) |
+| `--no-scrub-text` | false | Skip text removal (text scrubbing is enabled by default) |
+| `--text-threshold` | 0.1 | Text detection threshold (0-1, lower = more aggressive) |
+| `--text-expand` | 3 | Pixels to expand text mask by |
+
+### Scrubtext Options
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-t, --threshold` | 0.1 | Text detection threshold (0-1, lower = more aggressive) |
+| `--expand` | 3 | Pixels to expand text mask by |
 
 ## Architecture
 
 Single-file tool (`segment.py`) organized into sections:
 
-1. **Data Structures**: `BoundingBox`, `Block`, `PlateSegmentation`, `BlockSegmentation`, `PlateMetadata`
-2. **Configuration**: `FIRST_PASS_CONFIG` (22500 min area), `SECOND_PASS_CONFIG` (100 min area)
+1. **Data Structures**: `BoundingBox`, `Block`, `PlateSegmentation`, `BlockSegmentation`, `PlateMetadata`, `TextRegion`, `ScrubResult`
+2. **Configuration**: `FIRST_PASS_CONFIG` (22500 min area), `SECOND_PASS_CONFIG` (100 min area), `DEFAULT_TEXT_THRESHOLD` (0.1)
 3. **SVG Parsing**: `parse_plate_svg`, `parse_polygon_points`, `bbox_from_polygon_points`
 4. **Image Utilities**: `load_image` (with JP2 fallback via Pillow), `extract_region`
-5. **First-Pass Segmentation**: `segment_plate`, `filter_blocks_by_size`
-6. **Second-Pass Segmentation**: `segment_block`
-7. **SVG Generators**: `generate_plate_svg` (with metadata), `generate_block_svg`, `generate_combined_svg`
-8. **Output Management**: `parse_source_file`, `get_output_structure`
-9. **Stage Processors**: `process_stage1`, `process_stage2`, `process_plate_recursive` (legacy)
+5. **Text Detection/Inpainting**: `detect_text_regions` (DBNet++), `expand_mask`, `inpaint_with_lama`, `scrub_text_from_image`
+6. **First-Pass Segmentation**: `segment_plate`, `filter_blocks_by_size`
+7. **Second-Pass Segmentation**: `segment_block`
+8. **SVG Generators**: `generate_plate_svg` (with metadata), `generate_block_svg`, `generate_combined_svg`
+9. **Output Management**: `parse_source_file`, `get_output_structure`
+10. **Stage Processors**: `process_stage1`, `process_stage2`, `process_scrubtext`, `process_plate_recursive` (legacy)
 
 Key dependencies:
 - `segment-anything`: Meta's SAM library (installed from GitHub)
@@ -169,6 +191,8 @@ Key dependencies:
 - `Pillow`: JP2 fallback support
 - `flask`: Web server for the SVG editor
 - `shapely`: Polygon merging (geometric union)
+- `python-doctr`: Text detection using DBNet++ model
+- `simple-lama-inpainting`: LaMa model for text inpainting
 
 ## Device Selection
 
@@ -194,6 +218,25 @@ The `plate.svg` includes XML metadata for Stage 2 processing:
     <atlas:plate-id>p37</atlas:plate-id>
     <atlas:image-width>W</atlas:image-width>
     <atlas:image-height>H</atlas:image-height>
+    <!-- Optional: text regions detected during scrubbing (JSON array) -->
+    <atlas:text-regions>[{"x":100,"y":200,"width":50,"height":20,"center_x":125,"center_y":210},...]</atlas:text-regions>
   </atlas:source>
 </metadata>
 ```
+
+## Text Scrubbing
+
+The `scrubtext` subcommand removes text from source images before SAM processing:
+
+1. **Detection**: Uses DBNet++ (via python-doctr) for pixel-level text detection
+2. **Thresholding**: Binarizes the probability map (default threshold: 0.1)
+3. **Mask Expansion**: Dilates the mask to ensure text is fully covered (default: 3px)
+4. **Inpainting**: Uses LaMa (Large Mask Inpainting) to fill in the text regions
+
+Text region centers are stored as JSON metadata in `segmentation.svg` for downstream use. When running `scrubtext` standalone, a `text_regions.json` file is also saved.
+
+**Integration with Stage 2:**
+- Text scrubbing is **enabled by default** in stage2
+- Use `--no-scrub-text` to disable if needed
+- SAM runs against the text-free `scrubbed.png` image
+- Text regions are embedded in the combined `segmentation.svg` metadata

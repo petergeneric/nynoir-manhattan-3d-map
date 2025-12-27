@@ -14,4 +14,6 @@ dependencies = [
     "Pillow",  # For JP2 fallback support
     "flask",  # For editor web server
     "shapely",  # For polygon merging
+    "simple-lama-inpainting>=0.1.0",  # For text inpainting
+    "python-doctr[torch]>=0.11.0",  # For text detection (DBNet++)
 ]

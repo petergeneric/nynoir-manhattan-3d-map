@@ -7,10 +7,11 @@ Supports recursive segmentation for atlas plates:
 """
 
 import argparse
+import json
 import re
 import urllib.request
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -31,6 +32,10 @@ CHECKPOINT_NAME = "sam_vit_h_4b8939.pth"
 ATLAS_NAMESPACE = "http://example.com/atlas"
 SVG_NAMESPACE = "http://www.w3.org/2000/svg"
 XLINK_NAMESPACE = "http://www.w3.org/1999/xlink"
+
+# Text Detection Configuration
+DEFAULT_TEXT_THRESHOLD = 0.1  # Lower = more aggressive text detection
+DEFAULT_MASK_EXPAND = 3  # Pixels to expand detected text mask
 
 # Segmentation Configuration
 FIRST_PASS_CONFIG = {
@@ -151,6 +156,42 @@ class PlateMetadata:
     scale: Optional[float] = None
     pos_x: Optional[float] = None
     pos_y: Optional[float] = None
+
+
+@dataclass
+class TextRegion:
+    """A detected text region with bounding box and center coordinates."""
+    x: int
+    y: int
+    width: int
+    height: int
+
+    @property
+    def center_x(self) -> float:
+        return self.x + self.width / 2
+
+    @property
+    def center_y(self) -> float:
+        return self.y + self.height / 2
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "x": self.x,
+            "y": self.y,
+            "width": self.width,
+            "height": self.height,
+            "center_x": self.center_x,
+            "center_y": self.center_y
+        }
+
+
+@dataclass
+class ScrubResult:
+    """Result of text scrubbing operation."""
+    scrubbed_image_path: Path
+    text_regions: List[TextRegion] = field(default_factory=list)
+    mask_coverage_percent: float = 0.0
 
 
 def bbox_from_polygon_points(points: List[Tuple[int, int]]) -> BoundingBox:
@@ -400,6 +441,227 @@ def extract_region_with_bounds(
         output[dst_y1:dst_y2, dst_x1:dst_x2] = region_rgba
 
     return output
+
+
+# Text Detection and Inpainting Functions
+def detect_text_regions(
+    image_path: Path,
+    threshold: float = DEFAULT_TEXT_THRESHOLD
+) -> Tuple[np.ndarray, List[TextRegion]]:
+    """
+    Detect text using DBNet++ and return a binary mask and region list.
+
+    Args:
+        image_path: Path to the input image
+        threshold: Detection threshold (0-1, lower = more aggressive)
+
+    Returns:
+        Tuple of (binary mask with text pixels as 255, list of TextRegion objects)
+    """
+    from doctr.models import detection_predictor
+    from torchvision import transforms
+
+    device = get_device()
+    print(f"  Loading DBNet++ model on {device}...")
+
+    predictor = detection_predictor(
+        arch='db_resnet50',
+        pretrained=True,
+        assume_straight_pages=True,
+        preserve_aspect_ratio=True,
+    )
+    model = predictor.model.to(device)
+    model.eval()
+
+    # Load and prepare image
+    image_bgr = cv2.imread(str(image_path))
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    height, width = image_rgb.shape[:2]
+
+    # Preprocessing transform
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+
+    # Resize to make dimensions divisible by 32 (model requirement)
+    max_size = 2048
+    scale = min(max_size / height, max_size / width, 1.0)
+    new_h = ((int(height * scale) + 31) // 32) * 32
+    new_w = ((int(width * scale) + 31) // 32) * 32
+
+    resized = cv2.resize(image_rgb, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    img_tensor = transform(resized).unsqueeze(0).to(device)
+
+    print(f"  Running DBNet++ detection (threshold={threshold})...")
+
+    with torch.inference_mode():
+        feats = model.feat_extractor(img_tensor)
+        feats_list = [feats[str(i)] for i in range(len(feats))]
+        fpn_out = model.fpn(feats_list)
+        logits = model.prob_head(fpn_out)
+        prob_map = torch.sigmoid(logits)
+
+    # Convert to numpy and resize back
+    prob_map = prob_map.squeeze().cpu().numpy()
+    prob_map = cv2.resize(prob_map, (width, height), interpolation=cv2.INTER_LINEAR)
+
+    # Apply threshold to create binary mask
+    mask = ((prob_map >= threshold) * 255).astype(np.uint8)
+
+    # Find connected components to get text regions
+    text_regions = []
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        if w > 0 and h > 0:
+            text_regions.append(TextRegion(x=x, y=y, width=w, height=h))
+
+    pixel_count = np.count_nonzero(mask)
+    print(f"  Detected {pixel_count:,} text pixels ({pixel_count / (width * height) * 100:.2f}%)")
+    print(f"  Found {len(text_regions)} text regions")
+
+    return mask, text_regions
+
+
+def expand_mask(mask: np.ndarray, expand_pixels: int) -> np.ndarray:
+    """
+    Expand a binary mask by dilation.
+
+    Args:
+        mask: Binary mask (uint8)
+        expand_pixels: Number of pixels to expand by
+
+    Returns:
+        Expanded mask
+    """
+    if expand_pixels <= 0:
+        return mask
+
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (expand_pixels * 2 + 1, expand_pixels * 2 + 1)
+    )
+    return cv2.dilate(mask, kernel)
+
+
+def load_lama_model(device: torch.device):
+    """Load LaMa model with proper device mapping for non-CUDA systems."""
+    from simple_lama_inpainting.utils import download_model
+    from simple_lama_inpainting.models.model import LAMA_MODEL_URL
+
+    model_path = download_model(LAMA_MODEL_URL)
+
+    # Load with map_location to handle CUDA->CPU/MPS conversion
+    model = torch.jit.load(model_path, map_location='cpu')
+    model = model.to(device)
+    model.eval()
+
+    return model
+
+
+def inpaint_with_lama(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """
+    Inpaint using LaMa (Large Mask Inpainting) deep learning model.
+
+    Args:
+        image: Input image (BGR)
+        mask: Binary mask where 255 = regions to inpaint
+
+    Returns:
+        Inpainted image (BGR)
+    """
+    from PIL import Image as PILImage
+    from simple_lama_inpainting.utils import prepare_img_and_mask
+
+    # Convert BGR to RGB for PIL
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    pil_image = PILImage.fromarray(image_rgb)
+    pil_mask = PILImage.fromarray(mask)
+
+    # Load model with proper device handling
+    device = get_device()
+    print(f"  Loading LaMa model on {device}...")
+    model = load_lama_model(device)
+
+    # Prepare inputs
+    img_tensor, mask_tensor = prepare_img_and_mask(pil_image, pil_mask, device)
+
+    # Run inference
+    with torch.inference_mode():
+        inpainted = model(img_tensor, mask_tensor)
+        cur_res = inpainted[0].permute(1, 2, 0).detach().cpu().numpy()
+        cur_res = np.clip(cur_res * 255, 0, 255).astype(np.uint8)
+
+    # Convert RGB back to BGR
+    result_bgr = cv2.cvtColor(cur_res, cv2.COLOR_RGB2BGR)
+    return result_bgr
+
+
+def scrub_text_from_image(
+    input_path: Path,
+    output_path: Path,
+    threshold: float = DEFAULT_TEXT_THRESHOLD,
+    expand_pixels: int = DEFAULT_MASK_EXPAND
+) -> ScrubResult:
+    """
+    Detect and remove text from an image using DBNet++ and LaMa.
+
+    Args:
+        input_path: Path to input image
+        output_path: Path for output scrubbed image
+        threshold: Text detection threshold (0-1, lower = more aggressive)
+        expand_pixels: Pixels to expand text mask by
+
+    Returns:
+        ScrubResult with path to scrubbed image and detected text regions
+    """
+    print(f"  Scrubbing text from image...")
+    print(f"  Threshold: {threshold}, Mask expansion: {expand_pixels}px")
+
+    # Load image
+    image = cv2.imread(str(input_path))
+    if image is None:
+        raise RuntimeError(f"Could not load image: {input_path}")
+
+    height, width = image.shape[:2]
+    print(f"  Image size: {width}x{height}")
+
+    # Detect text regions
+    mask, text_regions = detect_text_regions(input_path, threshold)
+
+    # Expand mask if requested
+    if expand_pixels > 0:
+        print(f"  Expanding mask by {expand_pixels}px...")
+        mask = expand_mask(mask, expand_pixels)
+
+    mask_coverage = np.count_nonzero(mask) / (width * height) * 100
+    print(f"  Final mask coverage: {mask_coverage:.2f}%")
+
+    # Check if there's anything to inpaint
+    if np.count_nonzero(mask) == 0:
+        print("  No text detected - copying input to output")
+        cv2.imwrite(str(output_path), image)
+        return ScrubResult(
+            scrubbed_image_path=output_path,
+            text_regions=[],
+            mask_coverage_percent=0.0
+        )
+
+    # Inpaint with LaMa
+    print("  Inpainting with LaMa...")
+    result = inpaint_with_lama(image, mask)
+
+    # Save result
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(output_path), result)
+    print(f"  Saved scrubbed image: {output_path}")
+
+    return ScrubResult(
+        scrubbed_image_path=output_path,
+        text_regions=text_regions,
+        mask_coverage_percent=mask_coverage
+    )
 
 
 def generate_svg(sam_result: list, width: int, height: int, output_path: Path) -> None:
@@ -905,12 +1167,21 @@ def generate_block_svg(block_seg: BlockSegmentation, output_path: Path) -> None:
     print(f"  Saved block SVG: {output_path}")
 
 
-def generate_combined_svg(plate: PlateSegmentation, output_path: Path) -> None:
+def generate_combined_svg(
+    plate: PlateSegmentation,
+    output_path: Path,
+    text_regions: Optional[List[TextRegion]] = None
+) -> None:
     """Generate combined SVG with inlined block content.
 
     Inlines the polygon content from each block SVG file directly into
     the combined SVG for maximum compatibility with applications like
     Affinity Designer that don't support external SVG references.
+
+    Args:
+        plate: Plate segmentation data
+        output_path: Path to save the SVG
+        text_regions: Optional list of detected text regions to include in metadata
     """
     svg_parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" '
@@ -937,6 +1208,11 @@ def generate_combined_svg(plate: PlateSegmentation, output_path: Path) -> None:
         svg_parts.append(f'      <atlas:pos-x>{plate.pos_x}</atlas:pos-x>')
     if plate.pos_y is not None:
         svg_parts.append(f'      <atlas:pos-y>{plate.pos_y}</atlas:pos-y>')
+
+    # Add text regions as JSON metadata if provided
+    if text_regions:
+        text_centers_json = json.dumps([r.to_dict() for r in text_regions])
+        svg_parts.append(f'      <atlas:text-regions>{text_centers_json}</atlas:text-regions>')
 
     svg_parts.extend([
         '    </atlas:source>',
@@ -1095,11 +1371,24 @@ def process_stage1(
 
 
 # Stage 2: Block Segmentation
-def process_stage2(svg_path: Path, sam_model) -> None:
+def process_stage2(
+    svg_path: Path,
+    sam_model,
+    scrub_text: bool = False,
+    text_threshold: float = DEFAULT_TEXT_THRESHOLD,
+    text_expand: int = DEFAULT_MASK_EXPAND
+) -> None:
     """Stage 2: Read plate.svg, extract blocks, run SAM on each.
 
     Reads metadata from the plate.svg to find the source JP2, then
     processes each block polygon through SAM for detailed segmentation.
+
+    Args:
+        svg_path: Path to plate.svg file
+        sam_model: Loaded SAM model
+        scrub_text: If True, run text detection and inpainting before SAM
+        text_threshold: Text detection threshold (0-1, lower = more aggressive)
+        text_expand: Pixels to expand text mask by
     """
     print(f"Stage 2: Processing {svg_path}")
 
@@ -1115,13 +1404,31 @@ def process_stage2(svg_path: Path, sam_model) -> None:
         print(f"Error: Source JP2 not found: {metadata.jp2_path}")
         return
 
-    # Load source image
-    print("Loading source image...")
-    image_bgr = load_image(metadata.jp2_path)
-    print(f"Image size: {metadata.image_width}x{metadata.image_height}")
-
     # Determine output directory (same as plate.svg location)
     output_dir = svg_path.parent
+
+    # Optionally scrub text from the source image
+    text_regions: List[TextRegion] = []
+    if scrub_text:
+        print("\n" + "=" * 50)
+        print("Running text scrubbing...")
+        scrubbed_path = output_dir / "scrubbed.png"
+        scrub_result = scrub_text_from_image(
+            metadata.jp2_path,
+            scrubbed_path,
+            threshold=text_threshold,
+            expand_pixels=text_expand
+        )
+        text_regions = scrub_result.text_regions
+        source_image_path = scrub_result.scrubbed_image_path
+        print("=" * 50 + "\n")
+    else:
+        source_image_path = metadata.jp2_path
+
+    # Load source image (original or scrubbed)
+    print(f"Loading source image: {source_image_path}...")
+    image_bgr = load_image(source_image_path)
+    print(f"Image size: {metadata.image_width}x{metadata.image_height}")
 
     # Renumber blocks sequentially (preserve name if present)
     renumbered_blocks = []
@@ -1176,7 +1483,7 @@ def process_stage2(svg_path: Path, sam_model) -> None:
 
     # Apply cull filters and generate combined SVG
     print("\n" + "=" * 50)
-    process_combine(svg_path, apply_culling=True)
+    process_combine(svg_path, apply_culling=True, text_regions=text_regions)
 
     print(f"\nStage 2 complete!")
     print(f"Output files in: {output_dir}")
@@ -1302,7 +1609,11 @@ def process_extract(svg_path: Path) -> Path:
     return output_dir
 
 
-def process_combine(svg_path: Path, apply_culling: bool = True) -> None:
+def process_combine(
+    svg_path: Path,
+    apply_culling: bool = True,
+    text_regions: Optional[List[TextRegion]] = None
+) -> None:
     """Combine existing block SVGs into segmentation.svg without running SAM.
 
     Reads plate.svg metadata and block definitions, applies cull filters
@@ -1311,6 +1622,7 @@ def process_combine(svg_path: Path, apply_culling: bool = True) -> None:
     Args:
         svg_path: Path to plate.svg file
         apply_culling: Whether to apply cull filters to block SVGs (default True)
+        text_regions: Optional list of detected text regions to include in metadata
     """
     print(f"Combine: Processing {svg_path}")
 
@@ -1393,10 +1705,60 @@ def process_combine(svg_path: Path, apply_culling: bool = True) -> None:
     # Generate combined SVG
     print("\nGenerating combined segmentation.svg...")
     segmentation_svg_path = output_dir / "segmentation.svg"
-    generate_combined_svg(plate, segmentation_svg_path)
+    generate_combined_svg(plate, segmentation_svg_path, text_regions=text_regions)
 
     print(f"\nCombine complete!")
     print(f"Output: {segmentation_svg_path}")
+
+
+def process_scrubtext(
+    svg_path: Path,
+    threshold: float = DEFAULT_TEXT_THRESHOLD,
+    expand_pixels: int = DEFAULT_MASK_EXPAND
+) -> Tuple[Path, List[TextRegion]]:
+    """Scrub text from the source image referenced in plate.svg.
+
+    Reads metadata from plate.svg, applies text detection and inpainting
+    to the source image, and saves the scrubbed version.
+
+    Args:
+        svg_path: Path to plate.svg file
+        threshold: Text detection threshold (0-1, lower = more aggressive)
+        expand_pixels: Pixels to expand text mask by
+
+    Returns:
+        Tuple of (path to scrubbed image, list of detected text regions)
+    """
+    print(f"Scrubtext: Processing {svg_path}")
+
+    # Parse plate.svg to get metadata
+    print("Parsing plate.svg...")
+    metadata, _ = parse_plate_svg(svg_path)
+    print(f"Source image: {metadata.jp2_path}")
+    print(f"Volume: {metadata.volume}, Plate: {metadata.plate_id}")
+
+    # Verify source image exists
+    if not metadata.jp2_path.exists():
+        print(f"Error: Source image not found: {metadata.jp2_path}")
+        raise FileNotFoundError(f"Source image not found: {metadata.jp2_path}")
+
+    # Determine output path (same directory as plate.svg)
+    output_dir = svg_path.parent
+    scrubbed_path = output_dir / "scrubbed.png"
+
+    # Run text scrubbing
+    result = scrub_text_from_image(
+        metadata.jp2_path,
+        scrubbed_path,
+        threshold=threshold,
+        expand_pixels=expand_pixels
+    )
+
+    print(f"\nScrubtext complete!")
+    print(f"Output: {result.scrubbed_image_path}")
+    print(f"Found {len(result.text_regions)} text regions")
+
+    return result.scrubbed_image_path, result.text_regions
 
 
 # Main Recursive Workflow (Legacy)
@@ -1553,6 +1915,23 @@ def main():
         action="store_true",
         help="Force use of MPS (Apple Silicon GPU)"
     )
+    stage2_parser.add_argument(
+        "--no-scrub-text",
+        action="store_true",
+        help="Skip text removal (text scrubbing is enabled by default)"
+    )
+    stage2_parser.add_argument(
+        "--text-threshold",
+        type=float,
+        default=DEFAULT_TEXT_THRESHOLD,
+        help=f"Text detection threshold (0-1, lower = more aggressive, default: {DEFAULT_TEXT_THRESHOLD})"
+    )
+    stage2_parser.add_argument(
+        "--text-expand",
+        type=int,
+        default=DEFAULT_MASK_EXPAND,
+        help=f"Pixels to expand text mask by (default: {DEFAULT_MASK_EXPAND})"
+    )
 
     # Combine subcommand
     combine_parser = subparsers.add_parser(
@@ -1572,6 +1951,25 @@ def main():
         help="Extract block images from source JP2 (no SAM)"
     )
     extract_parser.add_argument("svg", help="Path to plate.svg file")
+
+    # Scrubtext subcommand
+    scrubtext_parser = subparsers.add_parser(
+        "scrubtext",
+        help="Remove text from source image using DBNet++ detection and LaMa inpainting"
+    )
+    scrubtext_parser.add_argument("svg", help="Path to plate.svg file")
+    scrubtext_parser.add_argument(
+        "-t", "--threshold",
+        type=float,
+        default=DEFAULT_TEXT_THRESHOLD,
+        help=f"Text detection threshold (0-1, lower = more aggressive, default: {DEFAULT_TEXT_THRESHOLD})"
+    )
+    scrubtext_parser.add_argument(
+        "--expand",
+        type=int,
+        default=DEFAULT_MASK_EXPAND,
+        help=f"Pixels to expand text mask by (default: {DEFAULT_MASK_EXPAND})"
+    )
 
     # Legacy mode (no subcommand) - runs both stages
     parser.add_argument("legacy_input", nargs="?", help="Input image (legacy mode: runs both stages)")
@@ -1644,7 +2042,13 @@ def main():
             return 1
 
         sam = load_sam_model(force_mps=args.mps)
-        process_stage2(svg_path, sam)
+        process_stage2(
+            svg_path,
+            sam,
+            scrub_text=not args.no_scrub_text,
+            text_threshold=args.text_threshold,
+            text_expand=args.text_expand
+        )
         return 0
 
     elif args.command == "combine":
@@ -1665,15 +2069,41 @@ def main():
         process_extract(svg_path)
         return 0
 
+    elif args.command == "scrubtext":
+        svg_path = Path(args.svg)
+        if not svg_path.exists():
+            print(f"Error: SVG file not found: {svg_path}")
+            return 1
+
+        scrubbed_path, text_regions = process_scrubtext(
+            svg_path,
+            threshold=args.threshold,
+            expand_pixels=args.expand
+        )
+
+        # Save text regions as JSON
+        text_json_path = svg_path.parent / "text_regions.json"
+        text_data = {
+            "threshold": args.threshold,
+            "expand_pixels": args.expand,
+            "regions": [r.to_dict() for r in text_regions]
+        }
+        with open(text_json_path, 'w') as f:
+            json.dump(text_data, f, indent=2)
+        print(f"Saved text regions metadata: {text_json_path}")
+
+        return 0
+
     # Legacy mode (no subcommand)
     if args.legacy_input is None:
         parser.print_help()
         print("\nExamples:")
-        print("  Stage 1: uv run python segment.py stage1 /path/to/image.jp2")
-        print("  Stage 2: uv run python segment.py stage2 output/vol1/p37/plate.svg")
-        print("  Combine: uv run python segment.py combine output/vol1/p37/plate.svg")
-        print("  Extract: uv run python segment.py extract output/vol1/p37/plate.svg")
-        print("  Both:    uv run python segment.py /path/to/image.jp2")
+        print("  Stage 1:   uv run python segment.py stage1 /path/to/image.jp2")
+        print("  Stage 2:   uv run python segment.py stage2 output/vol1/p37/plate.svg")
+        print("  Combine:   uv run python segment.py combine output/vol1/p37/plate.svg")
+        print("  Extract:   uv run python segment.py extract output/vol1/p37/plate.svg")
+        print("  Scrubtext: uv run python segment.py scrubtext output/vol1/p37/plate.svg")
+        print("  Both:      uv run python segment.py /path/to/image.jp2")
         return 0
 
     input_path = Path(args.legacy_input)
