@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Segment Anything Model tool - segments images and outputs PNG/SVG with polygon overlays.
-
-Supports recursive segmentation for atlas plates:
-1. First pass: Identify city blocks from full plates
-2. Second pass: Run detailed segmentation on each extracted block
+"""Segment Anything Model tool - segments images and outputs PNG/SVG with polygon overlays
+Supports recursive segmentation for atlas plates. Steps:
+1. Identify city blocks from full plates
+2. Run detailed segmentation on each extracted block
 """
 
 import argparse
@@ -28,7 +27,6 @@ MODEL_TYPE = "vit_h"
 CHECKPOINT_URL = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth"
 CHECKPOINT_NAME = "sam_vit_h_4b8939.pth"
 
-# SVG Metadata Configuration
 ATLAS_NAMESPACE = "http://example.com/atlas"
 SVG_NAMESPACE = "http://www.w3.org/2000/svg"
 XLINK_NAMESPACE = "http://www.w3.org/1999/xlink"
@@ -339,7 +337,7 @@ def get_device(force_mps: bool = False, allow_mps: bool = False) -> torch.device
     """Detect the best available device.
 
     Args:
-        force_mps: Force MPS even for SAM (experimental, may have float64 issues)
+        force_mps: Force MPS even for SAM
         allow_mps: Allow MPS for non-SAM operations (recommended for LaMa/DBNet++)
     """
     if torch.cuda.is_available():
@@ -2236,11 +2234,6 @@ def main():
         "-s", "--svg",
         help="[Single-pass only] Output SVG path"
     )
-    parser.add_argument(
-        "--mps",
-        action="store_true",
-        help="Force use of MPS (Apple Silicon GPU)"
-    )
 
     args = parser.parse_args()
 
@@ -2251,7 +2244,7 @@ def main():
             print(f"Error: Input image not found: {input_path}")
             return 1
 
-        sam = load_sam_model(force_mps=args.mps)
+        sam = load_sam_model(force_mps=False)
         process_stage1(
             input_path,
             Path(args.output_dir),
@@ -2337,7 +2330,7 @@ def main():
         print(f"Error: Input image not found: {input_path}")
         return 1
 
-    sam = load_sam_model(force_mps=args.mps)
+    sam = load_sam_model(force_mps=False)
 
     if args.single_pass:
         # Original single-pass mode for comparison
