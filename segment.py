@@ -669,6 +669,237 @@ def scrub_text_from_image(
     )
 
 
+# =============================================================================
+# Traditional CV Building Detection (for Stage 2)
+# =============================================================================
+
+# Default parameters for CV building detection
+CV_DEFAULT_DILATION = 3
+CV_DEFAULT_MIN_AREA = 100
+CV_DEFAULT_MAX_AREA = 60000  # Filter out large polygons (streets/background)
+CV_DEFAULT_MIN_WIDTH = 12.0  # Minimum width to be considered a building (not a sliver)
+CV_DEFAULT_MIN_LINE_LENGTH = 40
+
+
+def cv_filter_contours_by_area(
+    contours: List[np.ndarray],
+    min_area: float = CV_DEFAULT_MIN_AREA,
+    max_area: float = None
+) -> List[np.ndarray]:
+    """Filter contours by area range."""
+    result = []
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < min_area:
+            continue
+        if max_area is not None and area > max_area:
+            continue
+        result.append(c)
+    return result
+
+
+def cv_filter_by_minimum_width(
+    contours: List[np.ndarray],
+    min_width: float = CV_DEFAULT_MIN_WIDTH
+) -> List[np.ndarray]:
+    """Filter out contours that are too thin (slivers).
+
+    Uses the rotated minimum-area bounding rectangle to find the true
+    minimum width of each contour. This catches slivers regardless of
+    their length.
+    """
+    result = []
+    for c in contours:
+        rect = cv2.minAreaRect(c)
+        width, height = rect[1]  # (center, (w, h), angle)
+        min_dim = min(width, height)
+        if min_dim >= min_width:
+            result.append(c)
+    return result
+
+
+def cv_denoise_nlm(
+    gray: np.ndarray,
+    h: float = 10,
+    template_window: int = 7,
+    search_window: int = 21
+) -> np.ndarray:
+    """Non-local means denoising - good for removing noise while keeping edges."""
+    return cv2.fastNlMeansDenoising(gray, None, h, template_window, search_window)
+
+
+def cv_edges_canny(gray: np.ndarray, low: int = 50, high: int = 150) -> np.ndarray:
+    """Canny edge detection."""
+    return cv2.Canny(gray, low, high)
+
+
+def cv_remove_small_components(edges: np.ndarray, min_size: int = 50) -> np.ndarray:
+    """Remove small connected components from edge map (noise removal)."""
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(edges, connectivity=8)
+    result = np.zeros_like(edges)
+    for i in range(1, num_labels):  # Skip background (0)
+        if stats[i, cv2.CC_STAT_AREA] >= min_size:
+            result[labels == i] = 255
+    return result
+
+
+def cv_detect_lines_hough(
+    edges: np.ndarray,
+    min_length: int = CV_DEFAULT_MIN_LINE_LENGTH,
+    max_gap: int = 5
+) -> List[Tuple[int, int, int, int]]:
+    """Detect line segments using Probabilistic Hough Transform."""
+    lines = cv2.HoughLinesP(
+        edges,
+        rho=1,
+        theta=np.pi / 180,
+        threshold=50,
+        minLineLength=min_length,
+        maxLineGap=max_gap
+    )
+    if lines is None:
+        return []
+    return [tuple(line[0]) for line in lines]
+
+
+def cv_draw_lines_on_mask(
+    mask: np.ndarray,
+    lines: List[Tuple[int, int, int, int]],
+    thickness: int = 2
+) -> np.ndarray:
+    """Draw line segments onto a mask."""
+    result = mask.copy()
+    for x1, y1, x2, y2 in lines:
+        cv2.line(result, (x1, y1), (x2, y2), 255, thickness)
+    return result
+
+
+def cv_smooth_contour(contour: np.ndarray, smoothing: float = 0.005) -> np.ndarray:
+    """Smooth contour by fitting to a slightly simplified polygon."""
+    epsilon = smoothing * cv2.arcLength(contour, True)
+    return cv2.approxPolyDP(contour, epsilon, True)
+
+
+def detect_buildings_cv(
+    image: np.ndarray,
+    denoise: bool = True,
+    canny_low: int = 50,
+    canny_high: int = 150,
+    remove_noise_components: bool = False,
+    min_component_size: int = 50,
+    use_hough: bool = True,
+    min_line_length: int = CV_DEFAULT_MIN_LINE_LENGTH,
+    max_line_gap: int = 5,
+    dilation: int = CV_DEFAULT_DILATION,
+    min_area: float = CV_DEFAULT_MIN_AREA,
+    max_area: float = CV_DEFAULT_MAX_AREA,
+    min_width: float = CV_DEFAULT_MIN_WIDTH,
+    contour_smoothing: float = 0.005
+) -> List[np.ndarray]:
+    """Detect buildings using traditional CV pipeline.
+
+    Uses Canny edge detection with Hough line reinforcement.
+
+    Args:
+        image: Input image (BGR format)
+        denoise: Whether to apply NLM denoising
+        canny_low: Canny low threshold
+        canny_high: Canny high threshold
+        remove_noise_components: Remove small edge components
+        min_component_size: Minimum size for noise component removal
+        use_hough: Whether to use Hough line reinforcement
+        min_line_length: Minimum line length for Hough
+        max_line_gap: Maximum gap between line segments
+        dilation: Morphological dilation iterations
+        min_area: Minimum contour area
+        max_area: Maximum contour area (filters large regions)
+        min_width: Minimum contour width (filters slivers)
+        contour_smoothing: Contour simplification factor
+
+    Returns:
+        List of contours (numpy arrays)
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # Step 1: Denoising
+    if denoise:
+        gray = cv_denoise_nlm(gray, h=5)  # h=5 for smoother contours
+
+    # Step 2: Edge detection
+    edges = cv_edges_canny(gray, canny_low, canny_high)
+
+    # Step 3: Remove small noise components
+    if remove_noise_components:
+        edges = cv_remove_small_components(edges, min_component_size)
+
+    # Step 4: Hough line reinforcement
+    if use_hough:
+        lines = cv_detect_lines_hough(edges, min_line_length, max_line_gap)
+        edges = cv_draw_lines_on_mask(edges, lines, thickness=2)
+
+    # Step 5: Morphological operations
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=dilation)
+    dilated = cv2.dilate(closed, kernel, iterations=dilation)
+
+    # Step 6: Find contours
+    inverted = cv2.bitwise_not(dilated)
+    contours, _ = cv2.findContours(inverted, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Step 7: Filter by area
+    contours = cv_filter_contours_by_area(contours, min_area, max_area)
+
+    # Step 8: Filter out slivers
+    contours = cv_filter_by_minimum_width(contours, min_width)
+
+    # Step 9: Smooth contours
+    contours = [cv_smooth_contour(c, contour_smoothing) for c in contours]
+
+    return contours
+
+
+def segment_block_cv(
+    block_image_bgr: np.ndarray,
+    block_id: str,
+    parent_bbox: BoundingBox,
+    **cv_kwargs
+) -> BlockSegmentation:
+    """Segment a block using traditional CV instead of SAM.
+
+    Args:
+        block_image_bgr: Block image in BGR format
+        block_id: ID of the block
+        parent_bbox: Bounding box of the block in plate coordinates
+        **cv_kwargs: Additional arguments passed to detect_buildings_cv
+
+    Returns:
+        BlockSegmentation with detected contours
+    """
+    # Detect buildings using CV pipeline
+    contours = detect_buildings_cv(block_image_bgr, **cv_kwargs)
+
+    # Assign colors to contours
+    np.random.seed(int(block_id))
+    contours_with_colors = []
+    for contour in contours:
+        color = (
+            np.random.randint(0, 255),
+            np.random.randint(0, 255),
+            np.random.randint(0, 255)
+        )
+        contours_with_colors.append((contour, color))
+
+    height, width = block_image_bgr.shape[:2]
+
+    return BlockSegmentation(
+        block_id=block_id,
+        parent_bbox=parent_bbox,
+        local_width=width,
+        local_height=height,
+        contours=contours_with_colors
+    )
+
+
 def generate_svg(sam_result: list, width: int, height: int, output_path: Path) -> None:
     """Generate SVG file with polygon outlines from SAM masks."""
     # Generate consistent colors for each segment
@@ -1375,23 +1606,22 @@ def process_stage1(
     print(f"  3. Run: uv run python segment.py stage2 {plate_svg_path}")
 
 
-# Stage 2: Block Segmentation
+# Stage 2: Block Segmentation (using traditional CV)
 def process_stage2(
     svg_path: Path,
-    sam_model,
     scrub_text: bool = False,
     text_threshold: float = DEFAULT_TEXT_THRESHOLD,
     text_expand: int = DEFAULT_MASK_EXPAND
 ) -> None:
-    """Stage 2: Read plate.svg, extract blocks, run SAM on each.
+    """Stage 2: Read plate.svg, extract blocks, run CV detection on each.
 
     Reads metadata from the plate.svg to find the source JP2, then
-    processes each block polygon through SAM for detailed segmentation.
+    processes each block polygon through traditional CV (Canny edge detection
+    with Hough line reinforcement) for detailed building segmentation.
 
     Args:
         svg_path: Path to plate.svg file
-        sam_model: Loaded SAM model
-        scrub_text: If True, run text detection and inpainting before SAM
+        scrub_text: If True, run text detection and inpainting before CV
         text_threshold: Text detection threshold (0-1, lower = more aggressive)
         text_expand: Pixels to expand text mask by
     """
@@ -1460,22 +1690,19 @@ def process_stage2(
         pos_y=metadata.pos_y,
     )
 
-    # Process each block through SAM
+    # Process each block through traditional CV
     total_blocks = len(renumbered_blocks)
-    print(f"\nRunning SAM on {total_blocks} blocks...")
-    second_pass_generator = create_mask_generator(sam_model, SECOND_PASS_CONFIG)
+    print(f"\nRunning CV building detection on {total_blocks} blocks...")
 
     for idx, block in enumerate(renumbered_blocks, 1):
         print(f"  [{idx}/{total_blocks}] Block {block.id} ({block.bbox.width}x{block.bbox.height})...")
 
         # Extract block region from original image
         block_image_bgr = extract_region(image_bgr, block.bbox)
-        block_image_rgb = cv2.cvtColor(block_image_bgr, cv2.COLOR_BGR2RGB)
 
-        # Segment this block
-        block_seg = segment_block(
-            block_image_rgb,
-            second_pass_generator,
+        # Segment this block using CV
+        block_seg = segment_block_cv(
+            block_image_bgr,
             block.id,
             block.bbox
         )
@@ -1909,17 +2136,12 @@ def main():
         help="Force use of MPS (Apple Silicon GPU)"
     )
 
-    # Stage 2 subcommand
+    # Stage 2 subcommand (uses traditional CV, no SAM)
     stage2_parser = subparsers.add_parser(
         "stage2",
-        help="Process blocks from edited plate.svg"
+        help="Process blocks from edited plate.svg (uses CV, not SAM)"
     )
     stage2_parser.add_argument("svg", help="Path to plate.svg file")
-    stage2_parser.add_argument(
-        "--mps",
-        action="store_true",
-        help="Force use of MPS (Apple Silicon GPU)"
-    )
     stage2_parser.add_argument(
         "--no-scrub-text",
         action="store_true",
@@ -2046,10 +2268,9 @@ def main():
             print(f"Error: SVG file not found: {svg_path}")
             return 1
 
-        sam = load_sam_model(force_mps=args.mps)
+        # Stage 2 uses traditional CV, no SAM model needed
         process_stage2(
             svg_path,
-            sam,
             scrub_text=not args.no_scrub_text,
             text_threshold=args.text_threshold,
             text_expand=args.text_expand

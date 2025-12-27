@@ -4,12 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Segment Anything Model (SAM) tool that segments images and outputs SVG with polygon overlays. It uses Meta's SAM (vit_h model) via the segment-anything library.
+This tool segments atlas plate images and outputs SVG with polygon overlays. It uses a **hybrid approach**:
+- **Stage 1**: Uses Meta's SAM (Segment Anything Model, vit_h) for city block detection
+- **Stage 2**: Uses traditional CV (Canny edge detection + Hough line reinforcement) for building detection within blocks
 
 The tool supports a **two-stage workflow** for atlas plates with manual editing between stages:
-1. **Stage 1**: Detect city blocks from full plates, output `plate.svg` with embedded metadata
+1. **Stage 1**: Detect city blocks from full plates using SAM, output `plate.svg` with embedded metadata
 2. **Manual Editing**: Edit `plate.svg` to fix/merge/delete blocks
-3. **Stage 2**: Process edited blocks through SAM for detailed segmentation
+3. **Stage 2**: Process edited blocks through traditional CV for detailed building segmentation
 
 ## Input Files
 
@@ -126,12 +128,12 @@ Alternatively, open `plate.svg` in an SVG editor (Inkscape, Illustrator, etc.) a
 - Merge overlapping blocks
 - Adjust polygon boundaries
 
-### Stage 2: Detail Segmentation
+### Stage 2: Building Detection (CV)
 ```bash
 uv run python segment.py stage2 output/vol1/p37/plate.svg
 ```
 
-Reads metadata from `plate.svg` and outputs:
+Reads metadata from `plate.svg`, runs traditional CV building detection on each block, and outputs:
 ```
 output/vol1/p37/
 ├── plate.svg           # Original (manually edited)
@@ -157,10 +159,11 @@ Blocks are renumbered sequentially based on remaining polygons after editing.
 ### Stage 2 Options
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--mps` | false | Force MPS (Apple Silicon GPU) |
 | `--no-scrub-text` | false | Skip text removal (text scrubbing is enabled by default) |
 | `--text-threshold` | 0.1 | Text detection threshold (0-1, lower = more aggressive) |
 | `--text-expand` | 0 | Pixels to expand text mask by |
+
+Note: Stage 2 uses traditional CV (no GPU acceleration needed), so `--mps` is not applicable.
 
 ### Scrubtext Options
 | Option | Default | Description |
@@ -173,12 +176,12 @@ Blocks are renumbered sequentially based on remaining polygons after editing.
 Single-file tool (`segment.py`) organized into sections:
 
 1. **Data Structures**: `BoundingBox`, `Block`, `PlateSegmentation`, `BlockSegmentation`, `PlateMetadata`, `TextRegion`, `ScrubResult`
-2. **Configuration**: `FIRST_PASS_CONFIG` (22500 min area), `SECOND_PASS_CONFIG` (100 min area), `DEFAULT_TEXT_THRESHOLD` (0.1)
+2. **Configuration**: `FIRST_PASS_CONFIG` (SAM params), `CV_DEFAULT_*` (CV detection params), `DEFAULT_TEXT_THRESHOLD` (0.1)
 3. **SVG Parsing**: `parse_plate_svg`, `parse_polygon_points`, `bbox_from_polygon_points`
 4. **Image Utilities**: `load_image` (with JP2 fallback via Pillow), `extract_region`
 5. **Text Detection/Inpainting**: `detect_text_regions` (DBNet++), `expand_mask`, `inpaint_with_lama`, `scrub_text_from_image`
-6. **First-Pass Segmentation**: `segment_plate`, `filter_blocks_by_size`
-7. **Second-Pass Segmentation**: `segment_block`
+6. **First-Pass Segmentation (SAM)**: `segment_plate`, `filter_blocks_by_size`, `create_mask_generator`
+7. **Second-Pass Segmentation (CV)**: `detect_buildings_cv`, `segment_block_cv`, `cv_edges_canny`, `cv_detect_lines_hough`
 8. **SVG Generators**: `generate_plate_svg` (with metadata), `generate_block_svg`, `generate_combined_svg`
 9. **Output Management**: `parse_source_file`, `get_output_structure`
 10. **Stage Processors**: `process_stage1`, `process_stage2`, `process_scrubtext`, `process_plate_recursive` (legacy)
@@ -226,11 +229,11 @@ The `plate.svg` includes XML metadata for Stage 2 processing:
 
 ## Text Scrubbing
 
-The `scrubtext` subcommand removes text from source images before SAM processing:
+The `scrubtext` subcommand removes text from source images before CV building detection:
 
 1. **Detection**: Uses DBNet++ (via python-doctr) for pixel-level text detection
 2. **Thresholding**: Binarizes the probability map (default threshold: 0.1)
-3. **Mask Expansion**: Dilates the mask to ensure text is fully covered (default: 3px)
+3. **Mask Expansion**: Dilates the mask to ensure text is fully covered (default: 0px)
 4. **Inpainting**: Uses LaMa (Large Mask Inpainting) to fill in the text regions
 
 Text region centers are stored as JSON metadata in `segmentation.svg` for downstream use. When running `scrubtext` standalone, a `text_regions.json` file is also saved.
@@ -238,5 +241,19 @@ Text region centers are stored as JSON metadata in `segmentation.svg` for downst
 **Integration with Stage 2:**
 - Text scrubbing is **enabled by default** in stage2
 - Use `--no-scrub-text` to disable if needed
-- SAM runs against the text-free `scrubbed.png` image
+- CV building detection runs against the text-free `scrubbed.png` image
 - Text regions are embedded in the combined `segmentation.svg` metadata
+
+## Stage 2 CV Building Detection
+
+Stage 2 uses traditional computer vision techniques instead of SAM for faster, more deterministic building detection:
+
+1. **Denoising**: Non-local means (NLM) denoising to reduce noise while preserving edges
+2. **Edge Detection**: Canny edge detection (50-150 thresholds)
+3. **Line Reinforcement**: Hough line detection to strengthen building outlines
+4. **Morphological Operations**: Close + dilate to connect nearby edges
+5. **Contour Finding**: Extract contours from inverted edge mask
+6. **Filtering**: Remove small areas (<100px²), large areas (>60000px²), and thin slivers (<12px min width)
+7. **Smoothing**: Douglas-Peucker simplification for cleaner polygons
+
+This approach is faster than SAM and produces cleaner building footprints for atlas maps.
