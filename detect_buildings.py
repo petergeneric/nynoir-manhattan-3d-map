@@ -23,7 +23,8 @@ import numpy as np
 
 # Default parameters
 DEFAULT_DILATION = 3
-DEFAULT_MIN_AREA = 500
+DEFAULT_MIN_AREA = 100  # Lowered since we filter slivers by width, not area
+DEFAULT_MIN_WIDTH = 12.0  # Minimum width to be considered a building (not a sliver)
 DEFAULT_MIN_LINE_LENGTH = 40
 
 
@@ -55,31 +56,27 @@ def filter_contours_by_area(contours: List[np.ndarray],
     return result
 
 
-def filter_long_thin_contours(contours: List[np.ndarray],
-                              min_long_edge: int = 100,
-                              max_aspect_ratio: float = 10/3) -> List[np.ndarray]:
-    """Filter out long thin contours (likely not buildings).
+def filter_by_minimum_width(contours: List[np.ndarray],
+                            min_width: float = 8.0) -> List[np.ndarray]:
+    """Filter out contours that are too thin (slivers).
 
-    If a contour's bounding box has longest edge > min_long_edge pixels,
-    require aspect ratio <= max_aspect_ratio (long/short).
+    Uses the rotated minimum-area bounding rectangle to find the true
+    minimum width of each contour. This catches slivers regardless of
+    their length - a 3px wide sliver is filtered whether it's 50px or 200px long.
 
-    Default: if longest edge > 100px, must be at most 10:3 ratio.
+    Small compact buildings (e.g., 15×15) pass because their minimum
+    dimension is still >= min_width.
     """
     result = []
     for c in contours:
-        x, y, w, h = cv2.boundingRect(c)
-        long_edge = max(w, h)
-        short_edge = min(w, h)
+        # Get minimum area rotated bounding rectangle
+        rect = cv2.minAreaRect(c)
+        width, height = rect[1]  # (center, (w, h), angle)
+        min_dim = min(width, height)
 
-        # Only apply aspect ratio filter to larger contours
-        if long_edge > min_long_edge:
-            if short_edge == 0:
-                continue  # Degenerate, skip
-            aspect_ratio = long_edge / short_edge
-            if aspect_ratio > max_aspect_ratio:
-                continue  # Too thin, skip
+        if min_dim >= min_width:
+            result.append(c)
 
-        result.append(c)
     return result
 
 
@@ -216,6 +213,7 @@ def detect_buildings(
     dilation: int = DEFAULT_DILATION,
     min_area: float = DEFAULT_MIN_AREA,
     max_area: float = None,
+    min_width: float = DEFAULT_MIN_WIDTH,
     contour_smoothing: float = 0.005
 ) -> Tuple[List[np.ndarray], np.ndarray]:
     """Detect buildings with configurable pipeline.
@@ -252,8 +250,8 @@ def detect_buildings(
     # Step 7: Filter by area
     contours = filter_contours_by_area(contours, min_area, max_area)
 
-    # Step 8: Filter out long thin shapes (not buildings)
-    contours = filter_long_thin_contours(contours)
+    # Step 8: Filter out slivers (shapes too thin to be buildings)
+    contours = filter_by_minimum_width(contours, min_width)
 
     # Step 9: Smooth contours
     contours = [smooth_contour(c, contour_smoothing) for c in contours]
@@ -373,138 +371,53 @@ DEFAULT_MAX_AREA = 60000  # Filter out large polygons (streets/background)
 def run_batch_tests(image: np.ndarray, image_b64: str, width: int, height: int,
                     output_prefix: str, dilation: int, min_area: float,
                     max_area: float = DEFAULT_MAX_AREA,
+                    min_width: float = DEFAULT_MIN_WIDTH,
                     include_background: bool = False) -> None:
-    """Run batch of tests with denoising and parameter variations.
+    """Run focused set of tests - baseline, NLM smoothing, and min_width variations.
 
     Args:
         include_background: If True, embed image in SVG. If False, polygons only.
     """
 
     bg = image_b64 if include_background else None
+    filter_params = dict(min_area=min_area, max_area=max_area, min_width=min_width)
 
     # ==========================================================================
-    # Baseline: Best from previous tests (Canny + Hough, len40, gap5)
+    # Baseline: No denoising
     # ==========================================================================
-    print("\n[Baseline: Canny 50/150 + Hough len40 gap5]")
+    print("\n[Baseline]")
     contours, edges = detect_buildings(
         image, denoise_fn=None, use_hough=True,
         min_line_length=40, max_line_gap=5,
-        dilation=dilation, min_area=min_area, max_area=max_area
+        dilation=dilation, **filter_params
     )
     generate_svg(width, height, contours, Path(f"{output_prefix}_baseline.svg"), image_b64=bg)
     cv2.imwrite(f"{output_prefix}_baseline_edges.png", edges)
 
     # ==========================================================================
-    # Test different max_line_gap values (to avoid dotted lines)
+    # NLM h5: Smoother contours
     # ==========================================================================
-    print("\n[Max Line Gap Variations]")
-    for gap in [2, 3, 5, 8]:
-        contours, edges = detect_buildings(
-            image, denoise_fn=None, use_hough=True,
-            min_line_length=40, max_line_gap=gap,
-            dilation=dilation, min_area=min_area, max_area=max_area
-        )
-        generate_svg(width, height, contours, Path(f"{output_prefix}_gap{gap}.svg"), image_b64=bg)
-
-    # ==========================================================================
-    # Bilateral filter denoising (preserves edges)
-    # ==========================================================================
-    print("\n[Bilateral Filter Denoising]")
-    for d in [5, 9, 13]:
-        for sigma in [50, 75, 100]:
-            denoise_fn = lambda g, d=d, s=sigma: denoise_bilateral(g, d, s, s)
-            contours, edges = detect_buildings(
-                image, denoise_fn=denoise_fn, use_hough=True,
-                min_line_length=40, max_line_gap=5,
-                dilation=dilation, min_area=min_area, max_area=max_area
-            )
-            generate_svg(width, height, contours,
-                        Path(f"{output_prefix}_bilateral_d{d}_s{sigma}.svg"), image_b64=bg)
-
-    # Save one edge map for comparison
-    denoise_fn = lambda g: denoise_bilateral(g, 9, 75, 75)
-    _, edges = detect_buildings(image, denoise_fn=denoise_fn, use_hough=True,
-                                min_line_length=40, max_line_gap=5,
-                                dilation=dilation, min_area=min_area, max_area=max_area)
-    cv2.imwrite(f"{output_prefix}_bilateral_edges.png", edges)
-
-    # ==========================================================================
-    # Non-local means denoising
-    # ==========================================================================
-    print("\n[Non-Local Means Denoising]")
-    for h in [5, 10, 15]:
-        denoise_fn = lambda g, h=h: denoise_nlm(g, h)
-        contours, edges = detect_buildings(
-            image, denoise_fn=denoise_fn, use_hough=True,
-            min_line_length=40, max_line_gap=5,
-            dilation=dilation, min_area=min_area, max_area=max_area
-        )
-        generate_svg(width, height, contours,
-                    Path(f"{output_prefix}_nlm_h{h}.svg"), image_b64=bg)
-
-    # Save edge map
-    denoise_fn = lambda g: denoise_nlm(g, 10)
-    _, edges = detect_buildings(image, denoise_fn=denoise_fn, use_hough=True,
-                                min_line_length=40, max_line_gap=5,
-                                dilation=dilation, min_area=min_area, max_area=max_area)
-    cv2.imwrite(f"{output_prefix}_nlm_edges.png", edges)
-
-    # ==========================================================================
-    # Gaussian blur (simple)
-    # ==========================================================================
-    print("\n[Gaussian Blur]")
-    for ksize in [3, 5, 7]:
-        denoise_fn = lambda g, k=ksize: denoise_gaussian(g, k)
-        contours, edges = detect_buildings(
-            image, denoise_fn=denoise_fn, use_hough=True,
-            min_line_length=40, max_line_gap=5,
-            dilation=dilation, min_area=min_area, max_area=max_area
-        )
-        generate_svg(width, height, contours,
-                    Path(f"{output_prefix}_gauss{ksize}.svg"), image_b64=bg)
-
-    # ==========================================================================
-    # Remove small noise components from edges
-    # ==========================================================================
-    print("\n[Remove Small Edge Components]")
-    for min_size in [30, 50, 100]:
-        contours, edges = detect_buildings(
-            image, denoise_fn=None, use_hough=True,
-            remove_noise_components=True, min_component_size=min_size,
-            min_line_length=40, max_line_gap=5,
-            dilation=dilation, min_area=min_area, max_area=max_area
-        )
-        generate_svg(width, height, contours,
-                    Path(f"{output_prefix}_rmsmall{min_size}.svg"), image_b64=bg)
-
-    # ==========================================================================
-    # Combined: Bilateral + Remove small components
-    # ==========================================================================
-    print("\n[Combined: Bilateral + Remove Small]")
-    denoise_fn = lambda g: denoise_bilateral(g, 9, 75, 75)
+    print("\n[NLM h5 - smoother contours]")
     contours, edges = detect_buildings(
-        image, denoise_fn=denoise_fn, use_hough=True,
-        remove_noise_components=True, min_component_size=50,
+        image, denoise_fn=lambda g: denoise_nlm(g, 5), use_hough=True,
         min_line_length=40, max_line_gap=5,
-        dilation=dilation, min_area=min_area, max_area=max_area
+        dilation=dilation, **filter_params
     )
-    generate_svg(width, height, contours,
-                Path(f"{output_prefix}_bilateral_rmsmall.svg"), image_b64=bg)
-    cv2.imwrite(f"{output_prefix}_bilateral_rmsmall_edges.png", edges)
+    generate_svg(width, height, contours, Path(f"{output_prefix}_nlm_h5.svg"), image_b64=bg)
 
     # ==========================================================================
-    # Contour smoothing variations
+    # Test min_width variations (the sliver filter)
     # ==========================================================================
-    print("\n[Contour Smoothing]")
-    for smoothing in [0.002, 0.005, 0.01, 0.02]:
+    print("\n[Min Width Variations]")
+    for mw in [4, 6, 8, 10, 12]:
+        test_params = dict(min_area=min_area, max_area=max_area, min_width=mw)
         contours, _ = detect_buildings(
             image, denoise_fn=None, use_hough=True,
             min_line_length=40, max_line_gap=5,
-            dilation=dilation, min_area=min_area, max_area=max_area,
-            contour_smoothing=smoothing
+            dilation=dilation, **test_params
         )
         generate_svg(width, height, contours,
-                    Path(f"{output_prefix}_smooth{int(smoothing*1000)}.svg"), image_b64=bg)
+                    Path(f"{output_prefix}_minwidth{mw}.svg"), image_b64=bg)
 
 
 # =============================================================================
@@ -522,6 +435,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--min-area', type=float, default=DEFAULT_MIN_AREA)
     parser.add_argument('--max-area', type=float, default=DEFAULT_MAX_AREA,
                         help='Maximum polygon area (filter out large regions)')
+    parser.add_argument('--min-width', type=float, default=DEFAULT_MIN_WIDTH,
+                        help='Minimum width to be a building (filters thin slivers)')
     parser.add_argument('--with-background', action='store_true',
                         help='Include base64 image in SVG (larger files)')
 
@@ -534,13 +449,15 @@ def main():
     print(f"Loading image: {args.input}")
     image, image_b64, width, height = load_and_encode_image(args.input)
     print(f"Image size: {width}x{height}")
-    print(f"Parameters: dilation={args.dilation}, min_area={args.min_area}, max_area={args.max_area}")
+    print(f"Parameters: dilation={args.dilation}, min_area={args.min_area}, "
+          f"max_area={args.max_area}, min_width={args.min_width}")
     print(f"Background image in SVG: {args.with_background}")
 
     print("\nGenerating batch tests...")
     run_batch_tests(image, image_b64, width, height,
                     args.output, args.dilation, args.min_area,
                     max_area=args.max_area,
+                    min_width=args.min_width,
                     include_background=args.with_background)
 
     print("\nDone!")
