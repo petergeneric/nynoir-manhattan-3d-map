@@ -882,7 +882,7 @@
                 }
 
                 const image = document.createElementNS('http://www.w3.org/2000/svg', 'image');
-                image.setAttribute('href', `/media/${currentPlate.plate_id}.jpeg`);
+                image.setAttribute('href', `/plate-image/${currentPlate.volume}/${currentPlate.plate_id}`);
                 image.setAttribute('width', width);
                 image.setAttribute('height', height);
                 image.setAttribute('opacity', '0.7');

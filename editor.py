@@ -200,6 +200,41 @@ def cut_polygons(cutter_points_list: list[list[tuple[float, float]]],
     return results
 
 
+def get_jpeg_path_from_svg(svg_path: Path) -> Optional[Path]:
+    """Extract jp2-path from SVG metadata and convert to JPEG path."""
+    try:
+        tree = ET.parse(svg_path)
+        root = tree.getroot()
+
+        # Find metadata - try with and without namespace
+        metadata_elem = root.find(f'{{{SVG_NS}}}metadata')
+        if metadata_elem is None:
+            metadata_elem = root.find('metadata')
+        if metadata_elem is None:
+            metadata_elem = root.find(f'.//{{{SVG_NS}}}metadata')
+        if metadata_elem is None:
+            metadata_elem = root.find('.//metadata')
+
+        if metadata_elem is not None:
+            # Find atlas:source - try with and without namespace
+            source_elem = metadata_elem.find(f'{{{ATLAS_NS}}}source')
+            if source_elem is None:
+                source_elem = metadata_elem.find(f'.//{{{ATLAS_NS}}}source')
+
+            if source_elem is not None:
+                # Find jp2-path element
+                jp2_path_elem = source_elem.find(f'{{{ATLAS_NS}}}jp2-path')
+                if jp2_path_elem is not None and jp2_path_elem.text:
+                    # Convert .jp2 to .jpeg
+                    jp2_path = Path(jp2_path_elem.text)
+                    jpeg_path = jp2_path.with_suffix('.jpeg')
+                    return jpeg_path
+    except Exception as e:
+        print(f"Warning: Could not extract jp2-path from {svg_path}: {e}")
+
+    return None
+
+
 def get_plates() -> list[dict]:
     """Get list of available plates with their SVG files."""
     plates = []
@@ -221,9 +256,13 @@ def get_plates() -> list[dict]:
             plate_svg = plate_dir / "plate.svg"
             segmentation_svg = plate_dir / "segmentation.svg"
 
-            # Try to find corresponding JPEG
-            jpeg_path = MEDIA_DIR / f"{plate_id}.jpeg"
-            has_jpeg = jpeg_path.exists()
+            # Get JPEG path from plate.svg metadata (no fallback)
+            jpeg_path = None
+            has_jpeg = False
+            if plate_svg.exists():
+                jpeg_path = get_jpeg_path_from_svg(plate_svg)
+                if jpeg_path is not None:
+                    has_jpeg = jpeg_path.exists()
 
             # Add plate.svg entry if exists
             if plate_svg.exists():
@@ -812,6 +851,24 @@ def api_cut():
 def serve_media(filename):
     """Serve media files (JPEG images)."""
     return send_from_directory(MEDIA_DIR, filename)
+
+
+@app.route('/plate-image/<volume>/<plate_id>')
+def serve_plate_image(volume, plate_id):
+    """Serve plate JPEG image based on jp2-path from plate.svg metadata."""
+    svg_path = OUTPUT_DIR / volume / plate_id / "plate.svg"
+
+    if not svg_path.exists():
+        return jsonify({"error": "Plate not found"}), 404
+
+    jpeg_path = get_jpeg_path_from_svg(svg_path)
+    if jpeg_path is None:
+        return jsonify({"error": "No jp2-path in plate.svg metadata"}), 404
+
+    if not jpeg_path.exists():
+        return jsonify({"error": f"JPEG not found: {jpeg_path}"}), 404
+
+    return send_file(jpeg_path)
 
 
 def main():
