@@ -1929,8 +1929,8 @@ def main():
     stage2_parser.add_argument(
         "--text-expand",
         type=int,
-        default=DEFAULT_MASK_EXPAND,
-        help=f"Pixels to expand text mask by (default: {DEFAULT_MASK_EXPAND})"
+        default=0,
+        help="Pixels to expand text mask by (default: 0)"
     )
 
     # Combine subcommand

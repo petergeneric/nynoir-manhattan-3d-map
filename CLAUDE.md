@@ -160,13 +160,13 @@ Blocks are renumbered sequentially based on remaining polygons after editing.
 | `--mps` | false | Force MPS (Apple Silicon GPU) |
 | `--no-scrub-text` | false | Skip text removal (text scrubbing is enabled by default) |
 | `--text-threshold` | 0.1 | Text detection threshold (0-1, lower = more aggressive) |
-| `--text-expand` | 3 | Pixels to expand text mask by |
+| `--text-expand` | 0 | Pixels to expand text mask by |
 
 ### Scrubtext Options
 | Option | Default | Description |
 |--------|---------|-------------|
 | `-t, --threshold` | 0.1 | Text detection threshold (0-1, lower = more aggressive) |
-| `--expand` | 3 | Pixels to expand text mask by |
+| `--expand` | 0 | Pixels to expand text mask by |
 
 ## Architecture
 
