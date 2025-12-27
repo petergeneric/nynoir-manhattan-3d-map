@@ -25,7 +25,7 @@ for plate in $plates; do
     echo "[$current/$count] Processing: $plate"
     echo "----------------------------------------"
 
-    uv run python segment.py stage2 "$plate"
+    uv run python segment.py --no-overwrite stage2 "$plate"
 
     echo "----------------------------------------"
     echo "[$current/$count] Done: $plate"
