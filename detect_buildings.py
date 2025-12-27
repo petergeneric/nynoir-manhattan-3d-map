@@ -2,8 +2,8 @@
 """
 Building Footprint Detection using Edge Detection Techniques
 
-Detects building footprints from cleaned atlas map images using edge detection
-with line reinforcement for faint straight lines.
+Detects building footprints from cleaned atlas map images using Canny edge
+detection with Hough line reinforcement.
 
 Usage:
     uv run python detect_buildings.py -i p2crop.png -o buildings
@@ -41,15 +41,92 @@ def load_and_encode_image(path: Path) -> Tuple[np.ndarray, str, int, int]:
 
 
 def filter_contours_by_area(contours: List[np.ndarray],
-                            min_area: float = DEFAULT_MIN_AREA) -> List[np.ndarray]:
-    """Filter contours by minimum area."""
-    return [c for c in contours if cv2.contourArea(c) >= min_area]
+                            min_area: float = DEFAULT_MIN_AREA,
+                            max_area: float = None) -> List[np.ndarray]:
+    """Filter contours by area range."""
+    result = []
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < min_area:
+            continue
+        if max_area is not None and area > max_area:
+            continue
+        result.append(c)
+    return result
+
+
+def filter_long_thin_contours(contours: List[np.ndarray],
+                              min_long_edge: int = 100,
+                              max_aspect_ratio: float = 10/3) -> List[np.ndarray]:
+    """Filter out long thin contours (likely not buildings).
+
+    If a contour's bounding box has longest edge > min_long_edge pixels,
+    require aspect ratio <= max_aspect_ratio (long/short).
+
+    Default: if longest edge > 100px, must be at most 10:3 ratio.
+    """
+    result = []
+    for c in contours:
+        x, y, w, h = cv2.boundingRect(c)
+        long_edge = max(w, h)
+        short_edge = min(w, h)
+
+        # Only apply aspect ratio filter to larger contours
+        if long_edge > min_long_edge:
+            if short_edge == 0:
+                continue  # Degenerate, skip
+            aspect_ratio = long_edge / short_edge
+            if aspect_ratio > max_aspect_ratio:
+                continue  # Too thin, skip
+
+        result.append(c)
+    return result
 
 
 def simplify_contour(contour: np.ndarray, epsilon_factor: float = 0.005) -> np.ndarray:
     """Simplify contour using Douglas-Peucker algorithm."""
     epsilon = epsilon_factor * cv2.arcLength(contour, True)
     return cv2.approxPolyDP(contour, epsilon, True)
+
+
+# =============================================================================
+# Denoising Options
+# =============================================================================
+
+def denoise_none(gray: np.ndarray) -> np.ndarray:
+    """No denoising."""
+    return gray
+
+
+def denoise_bilateral(gray: np.ndarray, d: int = 9,
+                      sigma_color: float = 75, sigma_space: float = 75) -> np.ndarray:
+    """Bilateral filter - smooths while preserving edges.
+
+    d: Diameter of pixel neighborhood
+    sigma_color: Filter sigma in color space (larger = more colors mixed)
+    sigma_space: Filter sigma in coordinate space (larger = farther pixels influence)
+    """
+    return cv2.bilateralFilter(gray, d, sigma_color, sigma_space)
+
+
+def denoise_nlm(gray: np.ndarray, h: float = 10,
+                template_window: int = 7, search_window: int = 21) -> np.ndarray:
+    """Non-local means denoising - good for removing noise while keeping edges.
+
+    h: Filter strength (higher = more denoising but may lose detail)
+    """
+    return cv2.fastNlMeansDenoising(gray, None, h, template_window, search_window)
+
+
+def denoise_gaussian(gray: np.ndarray, ksize: int = 5) -> np.ndarray:
+    """Gaussian blur."""
+    return cv2.GaussianBlur(gray, (ksize, ksize), 0)
+
+
+def denoise_morph_open(gray: np.ndarray, ksize: int = 3) -> np.ndarray:
+    """Morphological opening on the image to reduce noise."""
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
+    return cv2.morphologyEx(gray, cv2.MORPH_OPEN, kernel)
 
 
 # =============================================================================
@@ -61,15 +138,32 @@ def edges_canny(gray: np.ndarray, low: int = 50, high: int = 150) -> np.ndarray:
     return cv2.Canny(gray, low, high)
 
 
+def remove_small_components(edges: np.ndarray, min_size: int = 50) -> np.ndarray:
+    """Remove small connected components from edge map (noise removal)."""
+    # Find connected components
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(edges, connectivity=8)
+
+    # Create output mask
+    result = np.zeros_like(edges)
+
+    # Keep only components larger than min_size
+    for i in range(1, num_labels):  # Skip background (0)
+        if stats[i, cv2.CC_STAT_AREA] >= min_size:
+            result[labels == i] = 255
+
+    return result
+
+
 # =============================================================================
-# Line Detection and Reinforcement
+# Line Detection
 # =============================================================================
 
 def detect_lines_hough(edges: np.ndarray, min_length: int = 40,
-                       max_gap: int = 10) -> List[Tuple[int, int, int, int]]:
+                       max_gap: int = 5) -> List[Tuple[int, int, int, int]]:
     """Detect line segments using Probabilistic Hough Transform.
 
-    Returns list of (x1, y1, x2, y2) line segments.
+    max_gap: Maximum gap between line segments to treat as single line.
+             Keep small (5) to avoid connecting dotted/dashed lines.
     """
     lines = cv2.HoughLinesP(
         edges,
@@ -86,28 +180,6 @@ def detect_lines_hough(edges: np.ndarray, min_length: int = 40,
     return [tuple(line[0]) for line in lines]
 
 
-def detect_lines_lsd(gray: np.ndarray, min_length: int = 40) -> List[Tuple[int, int, int, int]]:
-    """Detect line segments using Line Segment Detector (LSD).
-
-    LSD is often better than Hough for detecting faint lines.
-    Returns list of (x1, y1, x2, y2) line segments.
-    """
-    lsd = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD)
-    lines, _, _, _ = lsd.detect(gray)
-
-    if lines is None:
-        return []
-
-    result = []
-    for line in lines:
-        x1, y1, x2, y2 = line[0]
-        length = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-        if length >= min_length:
-            result.append((int(x1), int(y1), int(x2), int(y2)))
-
-    return result
-
-
 def draw_lines_on_mask(mask: np.ndarray, lines: List[Tuple[int, int, int, int]],
                        thickness: int = 2) -> np.ndarray:
     """Draw line segments onto a mask."""
@@ -117,137 +189,76 @@ def draw_lines_on_mask(mask: np.ndarray, lines: List[Tuple[int, int, int, int]],
     return result
 
 
-def extend_line_segment(x1: int, y1: int, x2: int, y2: int,
-                        extension: int = 5) -> Tuple[int, int, int, int]:
-    """Extend a line segment by `extension` pixels on each end."""
-    length = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-    if length == 0:
-        return (x1, y1, x2, y2)
+# =============================================================================
+# Contour Smoothing
+# =============================================================================
 
-    # Unit direction vector
-    dx = (x2 - x1) / length
-    dy = (y2 - y1) / length
-
-    # Extend both ends
-    new_x1 = int(x1 - dx * extension)
-    new_y1 = int(y1 - dy * extension)
-    new_x2 = int(x2 + dx * extension)
-    new_y2 = int(y2 + dy * extension)
-
-    return (new_x1, new_y1, new_x2, new_y2)
-
-
-def extend_lines(lines: List[Tuple[int, int, int, int]],
-                 extension: int = 5) -> List[Tuple[int, int, int, int]]:
-    """Extend all line segments."""
-    return [extend_line_segment(*line, extension) for line in lines]
-
-
-def find_nearby_endpoints(lines: List[Tuple[int, int, int, int]],
-                          max_distance: int = 20,
-                          max_angle_diff: float = 15.0) -> List[Tuple[int, int, int, int]]:
-    """Find pairs of line endpoints that are close and roughly collinear.
-
-    Returns new line segments that bridge the gaps.
-    """
-    if not lines:
-        return []
-
-    # Extract all endpoints with their line's angle
-    endpoints = []  # (x, y, angle, line_idx, is_start)
-    for idx, (x1, y1, x2, y2) in enumerate(lines):
-        angle = math.atan2(y2 - y1, x2 - x1)
-        endpoints.append((x1, y1, angle, idx, True))
-        endpoints.append((x2, y2, angle, idx, False))
-
-    bridges = []
-
-    # Check each pair of endpoints from different lines
-    for i, (x1, y1, angle1, idx1, _) in enumerate(endpoints):
-        for j, (x2, y2, angle2, idx2, _) in enumerate(endpoints):
-            if idx1 >= idx2:  # Same line or already checked
-                continue
-
-            # Check distance
-            dist = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-            if dist > max_distance or dist < 1:
-                continue
-
-            # Check angle similarity (lines should be roughly parallel)
-            angle_diff = abs(angle1 - angle2)
-            # Normalize to 0-90 range (lines can point opposite directions)
-            angle_diff = min(angle_diff, math.pi - angle_diff)
-            angle_diff_deg = math.degrees(angle_diff)
-
-            if angle_diff_deg <= max_angle_diff:
-                bridges.append((x1, y1, x2, y2))
-
-    return bridges
+def smooth_contour(contour: np.ndarray, smoothing: float = 0.02) -> np.ndarray:
+    """Smooth contour by fitting to a slightly simplified polygon."""
+    epsilon = smoothing * cv2.arcLength(contour, True)
+    return cv2.approxPolyDP(contour, epsilon, True)
 
 
 # =============================================================================
-# Combined Detection Approaches
+# Main Detection Pipeline
 # =============================================================================
 
-def detect_with_line_reinforcement(
+def detect_buildings(
     image: np.ndarray,
+    denoise_fn=None,
     canny_low: int = 50,
     canny_high: int = 150,
+    remove_noise_components: bool = False,
+    min_component_size: int = 50,
+    use_hough: bool = True,
     min_line_length: int = 40,
-    line_extension: int = 5,
-    use_lsd: bool = False,
-    bridge_gaps: bool = False,
-    bridge_distance: int = 20,
+    max_line_gap: int = 5,
     dilation: int = DEFAULT_DILATION,
-    min_area: float = DEFAULT_MIN_AREA
+    min_area: float = DEFAULT_MIN_AREA,
+    max_area: float = None,
+    contour_smoothing: float = 0.005
 ) -> Tuple[List[np.ndarray], np.ndarray]:
-    """Detect buildings with line reinforcement for faint straight lines.
+    """Detect buildings with configurable pipeline.
 
-    1. Run Canny edge detection
-    2. Detect straight line segments (Hough or LSD)
-    3. Optionally extend lines to bridge small gaps
-    4. Optionally connect nearby collinear endpoints
-    5. Combine edges with reinforced lines
-    6. Find contours
-
-    Returns (contours, final_edge_map)
+    Returns (contours, edge_map)
     """
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-    # Step 1: Canny edge detection
+    # Step 1: Denoising
+    if denoise_fn:
+        gray = denoise_fn(gray)
+
+    # Step 2: Edge detection
     edges = edges_canny(gray, canny_low, canny_high)
 
-    # Step 2: Detect line segments
-    if use_lsd:
-        lines = detect_lines_lsd(gray, min_line_length)
-    else:
-        lines = detect_lines_hough(edges, min_line_length)
+    # Step 3: Remove small noise components
+    if remove_noise_components:
+        edges = remove_small_components(edges, min_component_size)
 
-    # Step 3: Extend lines if requested
-    if line_extension > 0:
-        lines = extend_lines(lines, line_extension)
+    # Step 4: Hough line reinforcement
+    if use_hough:
+        lines = detect_lines_hough(edges, min_line_length, max_line_gap)
+        edges = draw_lines_on_mask(edges, lines, thickness=2)
 
-    # Step 4: Bridge gaps between nearby endpoints
-    if bridge_gaps:
-        bridges = find_nearby_endpoints(lines, bridge_distance)
-        lines = lines + bridges
-
-    # Step 5: Draw lines onto edge map
-    reinforced = draw_lines_on_mask(edges, lines, thickness=2)
-
-    # Step 6: Morphological operations
+    # Step 5: Morphological operations
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    closed = cv2.morphologyEx(reinforced, cv2.MORPH_CLOSE, kernel, iterations=dilation)
+    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=dilation)
     dilated = cv2.dilate(closed, kernel, iterations=dilation)
 
-    # Step 7: Find contours
+    # Step 6: Find contours
     inverted = cv2.bitwise_not(dilated)
     contours, _ = cv2.findContours(inverted, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    contours = filter_contours_by_area(contours, min_area)
-    contours = [simplify_contour(c) for c in contours]
+    # Step 7: Filter by area
+    contours = filter_contours_by_area(contours, min_area, max_area)
 
-    return contours, reinforced
+    # Step 8: Filter out long thin shapes (not buildings)
+    contours = filter_long_thin_contours(contours)
+
+    # Step 9: Smooth contours
+    contours = [smooth_contour(c, contour_smoothing) for c in contours]
+
+    return contours, edges
 
 
 # =============================================================================
@@ -274,32 +285,54 @@ def contour_to_svg_points(contour: np.ndarray) -> str:
     return " ".join(f"{p[0]},{p[1]}" for p in points)
 
 
-def generate_svg_with_background(
-    image_b64: str,
+def generate_svg(
     width: int,
     height: int,
     contours: List[np.ndarray],
     output_path: Path,
+    image_b64: str = None,
     fill_opacity: float = 0.5,
     stroke_width: int = 2
 ) -> None:
-    """Generate SVG with base64 image background and colored polygon overlay."""
+    """Generate SVG with colored polygon overlay.
+
+    Args:
+        width: SVG width
+        height: SVG height
+        contours: List of contours to draw
+        output_path: Output file path
+        image_b64: Optional base64-encoded background image (None = no background)
+        fill_opacity: Polygon fill opacity
+        stroke_width: Polygon stroke width
+    """
     colors = generate_distinct_colors(len(contours))
 
     svg_parts = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         f'<svg xmlns="http://www.w3.org/2000/svg"',
-        f'     xmlns:xlink="http://www.w3.org/1999/xlink"',
+    ]
+
+    if image_b64:
+        svg_parts.append(f'     xmlns:xlink="http://www.w3.org/1999/xlink"')
+
+    svg_parts.extend([
         f'     width="{width}" height="{height}"',
         f'     viewBox="0 0 {width} {height}">',
         '',
-        '  <!-- Background image -->',
-        f'  <image xlink:href="data:image/png;base64,{image_b64}"',
-        f'         width="{width}" height="{height}"/>',
-        '',
+    ])
+
+    if image_b64:
+        svg_parts.extend([
+            '  <!-- Background image -->',
+            f'  <image xlink:href="data:image/png;base64,{image_b64}"',
+            f'         width="{width}" height="{height}"/>',
+            '',
+        ])
+
+    svg_parts.extend([
         f'  <!-- Detected buildings: {len(contours)} polygons -->',
         '  <g id="detected-buildings">',
-    ]
+    ])
 
     for idx, contour in enumerate(contours):
         points_str = contour_to_svg_points(contour)
@@ -331,120 +364,147 @@ def generate_svg_with_background(
 
 
 # =============================================================================
-# Batch Test Generation
+# Batch Tests
 # =============================================================================
 
+DEFAULT_MAX_AREA = 60000  # Filter out large polygons (streets/background)
+
+
 def run_batch_tests(image: np.ndarray, image_b64: str, width: int, height: int,
-                    output_prefix: str, dilation: int, min_area: float) -> None:
-    """Run batch of tests with line reinforcement variations."""
+                    output_prefix: str, dilation: int, min_area: float,
+                    max_area: float = DEFAULT_MAX_AREA,
+                    include_background: bool = False) -> None:
+    """Run batch of tests with denoising and parameter variations.
 
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    Args:
+        include_background: If True, embed image in SVG. If False, polygons only.
+    """
 
-    # ==========================================================================
-    # Baseline: Canny 50/150 (the best from previous tests)
-    # ==========================================================================
-    print("\n[Baseline: Canny 50/150]")
-    edges = edges_canny(gray, 50, 150)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=dilation)
-    dilated = cv2.dilate(closed, kernel, iterations=dilation)
-    inverted = cv2.bitwise_not(dilated)
-    contours, _ = cv2.findContours(inverted, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    contours = filter_contours_by_area(contours, min_area)
-    contours = [simplify_contour(c) for c in contours]
-    generate_svg_with_background(image_b64, width, height, contours,
-                                 Path(f"{output_prefix}_baseline.svg"))
+    bg = image_b64 if include_background else None
 
     # ==========================================================================
-    # Hough line reinforcement with different min lengths
+    # Baseline: Best from previous tests (Canny + Hough, len40, gap5)
     # ==========================================================================
-    print("\n[Hough Line Reinforcement]")
-    for min_len in [30, 40, 50, 60]:
-        for ext in [0, 5, 10]:
-            name = f"hough_len{min_len}_ext{ext}"
-            contours, _ = detect_with_line_reinforcement(
-                image, 50, 150, min_line_length=min_len, line_extension=ext,
-                use_lsd=False, bridge_gaps=False, dilation=dilation, min_area=min_area
-            )
-            generate_svg_with_background(image_b64, width, height, contours,
-                                         Path(f"{output_prefix}_{name}.svg"))
+    print("\n[Baseline: Canny 50/150 + Hough len40 gap5]")
+    contours, edges = detect_buildings(
+        image, denoise_fn=None, use_hough=True,
+        min_line_length=40, max_line_gap=5,
+        dilation=dilation, min_area=min_area, max_area=max_area
+    )
+    generate_svg(width, height, contours, Path(f"{output_prefix}_baseline.svg"), image_b64=bg)
+    cv2.imwrite(f"{output_prefix}_baseline_edges.png", edges)
 
     # ==========================================================================
-    # Hough with gap bridging
+    # Test different max_line_gap values (to avoid dotted lines)
     # ==========================================================================
-    print("\n[Hough + Gap Bridging]")
-    for bridge_dist in [15, 20, 30]:
-        name = f"hough_bridge{bridge_dist}"
-        contours, _ = detect_with_line_reinforcement(
-            image, 50, 150, min_line_length=40, line_extension=5,
-            use_lsd=False, bridge_gaps=True, bridge_distance=bridge_dist,
-            dilation=dilation, min_area=min_area
+    print("\n[Max Line Gap Variations]")
+    for gap in [2, 3, 5, 8]:
+        contours, edges = detect_buildings(
+            image, denoise_fn=None, use_hough=True,
+            min_line_length=40, max_line_gap=gap,
+            dilation=dilation, min_area=min_area, max_area=max_area
         )
-        generate_svg_with_background(image_b64, width, height, contours,
-                                     Path(f"{output_prefix}_{name}.svg"))
+        generate_svg(width, height, contours, Path(f"{output_prefix}_gap{gap}.svg"), image_b64=bg)
 
     # ==========================================================================
-    # LSD line detection (often better for faint lines)
+    # Bilateral filter denoising (preserves edges)
     # ==========================================================================
-    print("\n[LSD Line Detection]")
-    for min_len in [30, 40, 50]:
-        for ext in [0, 5, 10]:
-            name = f"lsd_len{min_len}_ext{ext}"
-            contours, _ = detect_with_line_reinforcement(
-                image, 50, 150, min_line_length=min_len, line_extension=ext,
-                use_lsd=True, bridge_gaps=False, dilation=dilation, min_area=min_area
+    print("\n[Bilateral Filter Denoising]")
+    for d in [5, 9, 13]:
+        for sigma in [50, 75, 100]:
+            denoise_fn = lambda g, d=d, s=sigma: denoise_bilateral(g, d, s, s)
+            contours, edges = detect_buildings(
+                image, denoise_fn=denoise_fn, use_hough=True,
+                min_line_length=40, max_line_gap=5,
+                dilation=dilation, min_area=min_area, max_area=max_area
             )
-            generate_svg_with_background(image_b64, width, height, contours,
-                                         Path(f"{output_prefix}_{name}.svg"))
+            generate_svg(width, height, contours,
+                        Path(f"{output_prefix}_bilateral_d{d}_s{sigma}.svg"), image_b64=bg)
+
+    # Save one edge map for comparison
+    denoise_fn = lambda g: denoise_bilateral(g, 9, 75, 75)
+    _, edges = detect_buildings(image, denoise_fn=denoise_fn, use_hough=True,
+                                min_line_length=40, max_line_gap=5,
+                                dilation=dilation, min_area=min_area, max_area=max_area)
+    cv2.imwrite(f"{output_prefix}_bilateral_edges.png", edges)
 
     # ==========================================================================
-    # LSD with gap bridging
+    # Non-local means denoising
     # ==========================================================================
-    print("\n[LSD + Gap Bridging]")
-    for bridge_dist in [15, 20, 30]:
-        name = f"lsd_bridge{bridge_dist}"
-        contours, _ = detect_with_line_reinforcement(
-            image, 50, 150, min_line_length=40, line_extension=5,
-            use_lsd=True, bridge_gaps=True, bridge_distance=bridge_dist,
-            dilation=dilation, min_area=min_area
+    print("\n[Non-Local Means Denoising]")
+    for h in [5, 10, 15]:
+        denoise_fn = lambda g, h=h: denoise_nlm(g, h)
+        contours, edges = detect_buildings(
+            image, denoise_fn=denoise_fn, use_hough=True,
+            min_line_length=40, max_line_gap=5,
+            dilation=dilation, min_area=min_area, max_area=max_area
         )
-        generate_svg_with_background(image_b64, width, height, contours,
-                                     Path(f"{output_prefix}_{name}.svg"))
+        generate_svg(width, height, contours,
+                    Path(f"{output_prefix}_nlm_h{h}.svg"), image_b64=bg)
+
+    # Save edge map
+    denoise_fn = lambda g: denoise_nlm(g, 10)
+    _, edges = detect_buildings(image, denoise_fn=denoise_fn, use_hough=True,
+                                min_line_length=40, max_line_gap=5,
+                                dilation=dilation, min_area=min_area, max_area=max_area)
+    cv2.imwrite(f"{output_prefix}_nlm_edges.png", edges)
 
     # ==========================================================================
-    # Visualize detected lines (for debugging)
+    # Gaussian blur (simple)
     # ==========================================================================
-    print("\n[Line Detection Visualization]")
+    print("\n[Gaussian Blur]")
+    for ksize in [3, 5, 7]:
+        denoise_fn = lambda g, k=ksize: denoise_gaussian(g, k)
+        contours, edges = detect_buildings(
+            image, denoise_fn=denoise_fn, use_hough=True,
+            min_line_length=40, max_line_gap=5,
+            dilation=dilation, min_area=min_area, max_area=max_area
+        )
+        generate_svg(width, height, contours,
+                    Path(f"{output_prefix}_gauss{ksize}.svg"), image_b64=bg)
 
-    # Hough lines on blank canvas
-    edges = edges_canny(gray, 50, 150)
-    hough_lines = detect_lines_hough(edges, min_length=40)
-    line_img = np.zeros_like(gray)
-    line_img = draw_lines_on_mask(line_img, hough_lines, thickness=2)
-    cv2.imwrite(f"{output_prefix}_hough_lines.png", line_img)
-    print(f"  -> {output_prefix}_hough_lines.png: {len(hough_lines)} lines")
+    # ==========================================================================
+    # Remove small noise components from edges
+    # ==========================================================================
+    print("\n[Remove Small Edge Components]")
+    for min_size in [30, 50, 100]:
+        contours, edges = detect_buildings(
+            image, denoise_fn=None, use_hough=True,
+            remove_noise_components=True, min_component_size=min_size,
+            min_line_length=40, max_line_gap=5,
+            dilation=dilation, min_area=min_area, max_area=max_area
+        )
+        generate_svg(width, height, contours,
+                    Path(f"{output_prefix}_rmsmall{min_size}.svg"), image_b64=bg)
 
-    # LSD lines on blank canvas
-    lsd_lines = detect_lines_lsd(gray, min_length=40)
-    line_img = np.zeros_like(gray)
-    line_img = draw_lines_on_mask(line_img, lsd_lines, thickness=2)
-    cv2.imwrite(f"{output_prefix}_lsd_lines.png", line_img)
-    print(f"  -> {output_prefix}_lsd_lines.png: {len(lsd_lines)} lines")
+    # ==========================================================================
+    # Combined: Bilateral + Remove small components
+    # ==========================================================================
+    print("\n[Combined: Bilateral + Remove Small]")
+    denoise_fn = lambda g: denoise_bilateral(g, 9, 75, 75)
+    contours, edges = detect_buildings(
+        image, denoise_fn=denoise_fn, use_hough=True,
+        remove_noise_components=True, min_component_size=50,
+        min_line_length=40, max_line_gap=5,
+        dilation=dilation, min_area=min_area, max_area=max_area
+    )
+    generate_svg(width, height, contours,
+                Path(f"{output_prefix}_bilateral_rmsmall.svg"), image_b64=bg)
+    cv2.imwrite(f"{output_prefix}_bilateral_rmsmall_edges.png", edges)
 
-    # Canny + Hough reinforced
-    edges = edges_canny(gray, 50, 150)
-    hough_lines = detect_lines_hough(edges, min_length=40)
-    hough_lines = extend_lines(hough_lines, 5)
-    reinforced = draw_lines_on_mask(edges, hough_lines, thickness=2)
-    cv2.imwrite(f"{output_prefix}_canny_plus_hough.png", reinforced)
-    print(f"  -> {output_prefix}_canny_plus_hough.png")
-
-    # Canny + LSD reinforced
-    lsd_lines = detect_lines_lsd(gray, min_length=40)
-    lsd_lines = extend_lines(lsd_lines, 5)
-    reinforced = draw_lines_on_mask(edges, lsd_lines, thickness=2)
-    cv2.imwrite(f"{output_prefix}_canny_plus_lsd.png", reinforced)
-    print(f"  -> {output_prefix}_canny_plus_lsd.png")
+    # ==========================================================================
+    # Contour smoothing variations
+    # ==========================================================================
+    print("\n[Contour Smoothing]")
+    for smoothing in [0.002, 0.005, 0.01, 0.02]:
+        contours, _ = detect_buildings(
+            image, denoise_fn=None, use_hough=True,
+            min_line_length=40, max_line_gap=5,
+            dilation=dilation, min_area=min_area, max_area=max_area,
+            contour_smoothing=smoothing
+        )
+        generate_svg(width, height, contours,
+                    Path(f"{output_prefix}_smooth{int(smoothing*1000)}.svg"), image_b64=bg)
 
 
 # =============================================================================
@@ -452,15 +512,18 @@ def run_batch_tests(image: np.ndarray, image_b64: str, width: int, height: int,
 # =============================================================================
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description='Detect building footprints with line reinforcement.',
+        description='Detect building footprints with denoising options.',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument('-i', '--input', type=Path, default=Path('p2crop.png'))
     parser.add_argument('-o', '--output', type=str, default='buildings')
     parser.add_argument('-d', '--dilation', type=int, default=DEFAULT_DILATION)
     parser.add_argument('--min-area', type=float, default=DEFAULT_MIN_AREA)
+    parser.add_argument('--max-area', type=float, default=DEFAULT_MAX_AREA,
+                        help='Maximum polygon area (filter out large regions)')
+    parser.add_argument('--with-background', action='store_true',
+                        help='Include base64 image in SVG (larger files)')
 
     return parser.parse_args()
 
@@ -471,11 +534,14 @@ def main():
     print(f"Loading image: {args.input}")
     image, image_b64, width, height = load_and_encode_image(args.input)
     print(f"Image size: {width}x{height}")
-    print(f"Parameters: dilation={args.dilation}, min_area={args.min_area}")
+    print(f"Parameters: dilation={args.dilation}, min_area={args.min_area}, max_area={args.max_area}")
+    print(f"Background image in SVG: {args.with_background}")
 
-    print("\nGenerating batch tests with line reinforcement...")
+    print("\nGenerating batch tests...")
     run_batch_tests(image, image_b64, width, height,
-                    args.output, args.dilation, args.min_area)
+                    args.output, args.dilation, args.min_area,
+                    max_area=args.max_area,
+                    include_background=args.with_background)
 
     print("\nDone!")
     return 0
