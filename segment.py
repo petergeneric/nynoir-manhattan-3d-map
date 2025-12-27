@@ -1554,7 +1554,8 @@ def process_stage1(
     max_area_ratio: float = 0.7,
     scrub_text: bool = True,
     text_threshold: float = DEFAULT_TEXT_THRESHOLD,
-    text_expand: int = DEFAULT_MASK_EXPAND
+    text_expand: int = DEFAULT_MASK_EXPAND,
+    no_overwrite: bool = False
 ) -> None:
     """Stage 1: Detect blocks and output plate.svg with metadata.
 
@@ -1571,9 +1572,18 @@ def process_stage1(
         scrub_text: If True, run text detection and inpainting before SAM
         text_threshold: Text detection threshold (0-1, lower = more aggressive)
         text_expand: Pixels to expand text mask by
+        no_overwrite: If True, fail if output file already exists
     """
     # Determine output structure
     volume, plate_id, output_dir = get_output_structure(input_path, output_base)
+
+    # Check for existing output if --no-overwrite is set
+    if no_overwrite:
+        plate_svg_path = output_dir / "plate.svg"
+        if plate_svg_path.exists():
+            print(f"Error: Output file already exists: {plate_svg_path}")
+            print("Use without --no-overwrite to overwrite existing files.")
+            raise SystemExit(1)
 
     print(f"Stage 1: Processing plate {volume}/{plate_id}")
     print(f"Output directory: {output_dir}")
@@ -1640,7 +1650,8 @@ def process_stage2(
     svg_path: Path,
     scrub_text: bool = False,
     text_threshold: float = DEFAULT_TEXT_THRESHOLD,
-    text_expand: int = DEFAULT_MASK_EXPAND
+    text_expand: int = DEFAULT_MASK_EXPAND,
+    no_overwrite: bool = False
 ) -> None:
     """Stage 2: Read plate.svg, extract blocks, run CV detection on each.
 
@@ -1653,7 +1664,17 @@ def process_stage2(
         scrub_text: If True, run text detection and inpainting before CV
         text_threshold: Text detection threshold (0-1, lower = more aggressive)
         text_expand: Pixels to expand text mask by
+        no_overwrite: If True, fail if output file already exists
     """
+    # Check for existing output if --no-overwrite is set
+    if no_overwrite:
+        output_dir = svg_path.parent
+        segmentation_svg_path = output_dir / "segmentation.svg"
+        if segmentation_svg_path.exists():
+            print(f"Error: Output file already exists: {segmentation_svg_path}")
+            print("Use without --no-overwrite to overwrite existing files.")
+            raise SystemExit(1)
+
     print(f"Stage 2: Processing {svg_path}")
 
     # Parse plate.svg to get metadata and blocks
@@ -2181,6 +2202,11 @@ def main():
         default=0,
         help="Pixels to expand text mask by (default: 0)"
     )
+    stage1_parser.add_argument(
+        "--no-overwrite",
+        action="store_true",
+        help="Fail with error if output file already exists"
+    )
 
     # Stage 2 subcommand (uses traditional CV, no SAM)
     stage2_parser = subparsers.add_parser(
@@ -2204,6 +2230,11 @@ def main():
         type=int,
         default=0,
         help="Pixels to expand text mask by (default: 0)"
+    )
+    stage2_parser.add_argument(
+        "--no-overwrite",
+        action="store_true",
+        help="Fail with error if output file already exists"
     )
 
     # Combine subcommand
@@ -2302,7 +2333,8 @@ def main():
             args.max_area_ratio,
             scrub_text=not args.no_scrub_text,
             text_threshold=args.text_threshold,
-            text_expand=args.text_expand
+            text_expand=args.text_expand,
+            no_overwrite=args.no_overwrite
         )
         return 0
 
@@ -2317,7 +2349,8 @@ def main():
             svg_path,
             scrub_text=not args.no_scrub_text,
             text_threshold=args.text_threshold,
-            text_expand=args.text_expand
+            text_expand=args.text_expand,
+            no_overwrite=args.no_overwrite
         )
         return 0
 
