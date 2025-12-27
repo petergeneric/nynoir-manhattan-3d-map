@@ -335,13 +335,18 @@ def download_checkpoint(checkpoint_path: Path) -> None:
     print("\nDownload complete!")
 
 
-def get_device(force_mps: bool = False) -> torch.device:
-    """Detect the best available device."""
+def get_device(force_mps: bool = False, allow_mps: bool = False) -> torch.device:
+    """Detect the best available device.
+
+    Args:
+        force_mps: Force MPS even for SAM (experimental, may have float64 issues)
+        allow_mps: Allow MPS for non-SAM operations (recommended for LaMa/DBNet++)
+    """
     if torch.cuda.is_available():
         return torch.device("cuda")
-    elif force_mps and torch.backends.mps.is_available():
+    elif (force_mps or allow_mps) and torch.backends.mps.is_available():
         return torch.device("mps")
-    # Note: MPS has float64 compatibility issues with SAM, using CPU instead
+    # Note: MPS has float64 compatibility issues with SAM, so only use if explicitly allowed
     else:
         return torch.device("cpu")
 
@@ -461,7 +466,7 @@ def detect_text_regions(
     from doctr.models import detection_predictor
     from torchvision import transforms
 
-    device = get_device()
+    device = get_device(allow_mps=True)
     print(f"  Loading DBNet++ model on {device}...")
 
     predictor = detection_predictor(
@@ -580,7 +585,7 @@ def inpaint_with_lama(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
     pil_mask = PILImage.fromarray(mask)
 
     # Load model with proper device handling
-    device = get_device()
+    device = get_device(allow_mps=True)
     print(f"  Loading LaMa model on {device}...")
     model = load_lama_model(device)
 
