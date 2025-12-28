@@ -104,20 +104,27 @@ The dropdown shows both `[plate]` and `[segmentation]` entries for each processe
 - Select/delete entire blocks (with all their polygons)
 - Save changes to both `segmentation.svg` AND individual `b-XXXX.svg` files
 
-Keyboard shortcuts:
+**Bottom action bar** provides quick access to common actions:
+- Delete, Undelete, Merge, Cut, Isolate, Delete Visible, Flash
+- Help button opens keyboard shortcuts modal
+
+Keyboard shortcuts (press `?` to see full list):
 - `Delete` / `Backspace`: Delete selected
 - `M`: Merge selected (plate mode only)
 - `U`: Undo last delete
+- `Z`: Cut selected from overlapping polygons
 - `H`: Hide selected
 - `S`: Show all
 - `I`: Isolate small polygons (hide all with area > threshold)
 - `X`: Delete all visible polygons
 - `L`: Toggle labels
 - `F`: Flash all visible polygons on/off (press again to stop)
+- `N`: New polygon (plate mode only) - click points to draw, click first point to close
 - `Ctrl+S`: Save changes
 - `Ctrl+A`: Select all
-- `Escape`: Deselect all
+- `Escape`: Deselect all / cancel drawing / close modal
 - `+` / `-` / `0`: Zoom in / out / fit
+- `?`: Open help modal
 
 The area threshold input (default 100) filters polygons by SVG area for the Isolate command.
 

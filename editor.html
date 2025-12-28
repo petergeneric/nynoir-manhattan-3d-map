@@ -339,24 +339,216 @@
             color: #888;
         }
 
-        .help-text {
+        /* Bottom action bar */
+        .bottom-bar {
             position: absolute;
             bottom: 20px;
             left: 20px;
-            background: rgba(22, 33, 62, 0.9);
-            padding: 12px 16px;
+            right: 100px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(22, 33, 62, 0.95);
+            padding: 8px 12px;
             border-radius: 6px;
-            font-size: 12px;
-            color: #888;
-            line-height: 1.6;
+            border: 1px solid #0f3460;
         }
 
-        .help-text kbd {
+        .bottom-bar button {
             background: #0f3460;
-            padding: 2px 6px;
-            border-radius: 3px;
+            color: #fff;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            transition: background 0.2s;
+            white-space: nowrap;
+        }
+
+        .bottom-bar button:hover:not(:disabled) {
+            background: #1a4a7a;
+        }
+
+        .bottom-bar button:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        .bottom-bar button.danger {
+            background: #8b0000;
+        }
+
+        .bottom-bar button.danger:hover:not(:disabled) {
+            background: #a52a2a;
+        }
+
+        .bottom-bar button.warning {
+            background: #8b6914;
+        }
+
+        .bottom-bar button.warning:hover:not(:disabled) {
+            background: #a57d1a;
+        }
+
+        .bottom-bar button.merge {
+            background: #6b4ba8;
+        }
+
+        .bottom-bar button.merge:hover:not(:disabled) {
+            background: #7d5cc0;
+        }
+
+        .bottom-bar button.flash {
+            background: #2a6a4a;
+        }
+
+        .bottom-bar button.flash:hover:not(:disabled) {
+            background: #3a8a5a;
+        }
+
+        .bottom-bar button.flash.active {
+            background: #4ade80;
+            color: #000;
+        }
+
+        .bottom-bar .separator {
+            width: 1px;
+            height: 24px;
+            background: #0f3460;
+            margin: 0 4px;
+        }
+
+        .bottom-bar .spacer {
+            flex: 1;
+        }
+
+        .bottom-bar button.help {
+            background: #3a506b;
+        }
+
+        .bottom-bar button.help:hover {
+            background: #4a6a8b;
+        }
+
+        .bottom-bar kbd {
+            background: #1a1a2e;
+            padding: 1px 4px;
+            border-radius: 2px;
             font-family: monospace;
+            font-size: 10px;
+            color: #888;
+            margin-left: 4px;
+        }
+
+        /* Help Modal */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 2000;
+        }
+
+        .modal-overlay.active {
+            display: flex;
+        }
+
+        .modal {
+            background: #16213e;
+            border-radius: 8px;
+            border: 1px solid #0f3460;
+            max-width: 600px;
+            width: 90%;
+            max-height: 80vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .modal-header {
+            padding: 16px 20px;
+            border-bottom: 1px solid #0f3460;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .modal-header h2 {
+            font-size: 18px;
+            font-weight: 500;
+            color: #e94560;
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            color: #888;
+            font-size: 24px;
+            cursor: pointer;
+            padding: 0;
+            line-height: 1;
+        }
+
+        .modal-close:hover {
+            color: #fff;
+        }
+
+        .modal-body {
+            padding: 20px;
+            overflow-y: auto;
+        }
+
+        .shortcut-group {
+            margin-bottom: 20px;
+        }
+
+        .shortcut-group h3 {
+            font-size: 13px;
+            font-weight: 600;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 10px;
+            padding-bottom: 6px;
+            border-bottom: 1px solid #0f3460;
+        }
+
+        .shortcut-list {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 8px;
+        }
+
+        .shortcut-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 6px 0;
+        }
+
+        .shortcut-item kbd {
+            background: #0f3460;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
             color: #ccc;
+            min-width: 60px;
+            text-align: center;
+        }
+
+        .shortcut-item span {
+            color: #aaa;
+            font-size: 13px;
         }
 
         .loading {
@@ -574,6 +766,56 @@
         .toolbar button.select-complexity:hover:not(:disabled) {
             background: #6b5a9c;
         }
+
+        /* Drawing mode styles */
+        .drawing-mode #canvas-wrapper {
+            cursor: crosshair !important;
+        }
+
+        .drawing-point {
+            fill: #e94560;
+            stroke: white;
+            stroke-width: 2;
+            cursor: pointer;
+        }
+
+        .drawing-point.first-point:hover {
+            fill: #4ade80;
+            transform-origin: center;
+            transform: scale(1.3);
+        }
+
+        .drawing-line {
+            stroke: #e94560;
+            stroke-width: 2;
+            stroke-dasharray: 5,5;
+            fill: none;
+        }
+
+        .drawing-preview {
+            fill: rgba(233, 69, 96, 0.2);
+            stroke: #e94560;
+            stroke-width: 2;
+            stroke-dasharray: 5,5;
+        }
+
+        .drawing-indicator {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(233, 69, 96, 0.9);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 14px;
+            z-index: 100;
+            display: none;
+        }
+
+        .drawing-indicator.active {
+            display: block;
+        }
     </style>
 </head>
 <body>
@@ -642,6 +884,7 @@
                 </div>
             </div>
             <div class="loading" id="loading">Select a plate to begin</div>
+            <div class="drawing-indicator" id="drawing-indicator">Drawing mode: Click to add points, click first point to close</div>
 
             <div class="zoom-controls">
                 <button id="btn-zoom-out">-</button>
@@ -650,24 +893,74 @@
                 <button id="btn-zoom-fit">Fit</button>
             </div>
 
-            <div class="help-text">
-                <kbd>Click</kbd> Select &nbsp;
-                <kbd>Shift+Click</kbd> Multi-select &nbsp;
-                <kbd>Dbl-Click</kbd> Rename &nbsp;
-                <kbd>Delete</kbd> Delete &nbsp;
-                <kbd>U</kbd> Undelete &nbsp;
-                <kbd>M</kbd> Merge &nbsp;
-                <kbd>Z</kbd> Cut from overlapping &nbsp;
-                <kbd>H</kbd> Hide &nbsp;
-                <kbd>S</kbd> Show all &nbsp;
-                <kbd>I</kbd> Isolate small &nbsp;
-                <kbd>X</kbd> Del visible &nbsp;
-                <kbd>L</kbd> Labels &nbsp;
-                <kbd>F</kbd> Flash &nbsp;
-                <kbd>Ctrl+S</kbd> Save
+            <div class="bottom-bar">
+                <button id="bar-delete" class="danger" disabled title="Delete selected">Delete<kbd>Del</kbd></button>
+                <button id="bar-undelete" disabled title="Restore last deleted">Undelete<kbd>U</kbd></button>
+                <div class="separator"></div>
+                <button id="bar-merge" class="merge" disabled title="Merge selected polygons">Merge<kbd>M</kbd></button>
+                <button id="bar-cut" disabled title="Cut selected from overlapping">Cut<kbd>Z</kbd></button>
+                <div class="separator"></div>
+                <button id="bar-isolate" class="warning" disabled title="Isolate small polygons">Isolate<kbd>I</kbd></button>
+                <button id="bar-delete-visible" class="danger" disabled title="Delete all visible polygons">Del Visible<kbd>X</kbd></button>
+                <div class="separator"></div>
+                <button id="bar-flash" class="flash" disabled title="Flash polygons on/off">Flash<kbd>F</kbd></button>
+                <div class="spacer"></div>
+                <button id="bar-help" class="help" title="Show keyboard shortcuts">Help<kbd>?</kbd></button>
             </div>
         </div>
     </main>
+
+    <!-- Help Modal -->
+    <div class="modal-overlay" id="help-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2>Keyboard Shortcuts</h2>
+                <button class="modal-close" id="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="shortcut-group">
+                    <h3>Selection</h3>
+                    <div class="shortcut-list">
+                        <div class="shortcut-item"><kbd>Click</kbd><span>Select polygon</span></div>
+                        <div class="shortcut-item"><kbd>Shift+Click</kbd><span>Multi-select</span></div>
+                        <div class="shortcut-item"><kbd>Ctrl+A</kbd><span>Select all</span></div>
+                        <div class="shortcut-item"><kbd>Escape</kbd><span>Deselect all</span></div>
+                    </div>
+                </div>
+                <div class="shortcut-group">
+                    <h3>Editing</h3>
+                    <div class="shortcut-list">
+                        <div class="shortcut-item"><kbd>Delete</kbd><span>Delete selected</span></div>
+                        <div class="shortcut-item"><kbd>U</kbd><span>Undelete last</span></div>
+                        <div class="shortcut-item"><kbd>M</kbd><span>Merge selected</span></div>
+                        <div class="shortcut-item"><kbd>Z</kbd><span>Cut from overlapping</span></div>
+                        <div class="shortcut-item"><kbd>N</kbd><span>New polygon (draw)</span></div>
+                        <div class="shortcut-item"><kbd>Dbl-Click</kbd><span>Rename block</span></div>
+                    </div>
+                </div>
+                <div class="shortcut-group">
+                    <h3>Visibility</h3>
+                    <div class="shortcut-list">
+                        <div class="shortcut-item"><kbd>H</kbd><span>Hide selected</span></div>
+                        <div class="shortcut-item"><kbd>S</kbd><span>Show all</span></div>
+                        <div class="shortcut-item"><kbd>I</kbd><span>Isolate small polygons</span></div>
+                        <div class="shortcut-item"><kbd>X</kbd><span>Delete all visible</span></div>
+                        <div class="shortcut-item"><kbd>L</kbd><span>Toggle labels</span></div>
+                        <div class="shortcut-item"><kbd>F</kbd><span>Flash polygons</span></div>
+                    </div>
+                </div>
+                <div class="shortcut-group">
+                    <h3>View & Save</h3>
+                    <div class="shortcut-list">
+                        <div class="shortcut-item"><kbd>+</kbd><span>Zoom in</span></div>
+                        <div class="shortcut-item"><kbd>-</kbd><span>Zoom out</span></div>
+                        <div class="shortcut-item"><kbd>0</kbd><span>Fit to view</span></div>
+                        <div class="shortcut-item"><kbd>Ctrl+S</kbd><span>Save changes</span></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <script>
         // State
@@ -688,6 +981,8 @@
         let currentSvgData = null;  // Store current SVG data for re-renders
         let flashInterval = null;  // Interval ID for flash animation
         let isolationMode = null;  // 'area', 'complexity', or null
+        let isDrawingMode = false;  // Whether we're in polygon drawing mode
+        let drawingPoints = [];     // Points being collected for new polygon
 
         // DOM elements
         const plateSelect = document.getElementById('plate-select');
@@ -707,6 +1002,18 @@
         const complexityThreshold = document.getElementById('complexity-threshold');
         const btnSelectComplexity = document.getElementById('btn-select-complexity');
         const backgroundModeSelect = document.getElementById('background-mode');
+
+        // Bottom bar buttons
+        const barDelete = document.getElementById('bar-delete');
+        const barUndelete = document.getElementById('bar-undelete');
+        const barMerge = document.getElementById('bar-merge');
+        const barCut = document.getElementById('bar-cut');
+        const barIsolate = document.getElementById('bar-isolate');
+        const barDeleteVisible = document.getElementById('bar-delete-visible');
+        const barFlash = document.getElementById('bar-flash');
+        const barHelp = document.getElementById('bar-help');
+        const helpModal = document.getElementById('help-modal');
+        const modalClose = document.getElementById('modal-close');
 
         // Initialize
         async function init() {
@@ -1360,14 +1667,29 @@
         function updateButtons() {
             const hasPlate = currentPlate !== null;
             const canUndo = deleteHistory.length > 0;
+            const hasSelection = selectedIds.size > 0;
+            const hasMultiSelection = selectedIds.size >= 2;
 
             // Both modes now use unified structure
             const itemCount = polygons.length;
 
+            // Header toolbar buttons
             btnSave.disabled = !hasChanges;
             btnUndelete.disabled = !canUndo;
             btnIsolate.disabled = !hasPlate || itemCount === 0;
             btnSelectComplexity.disabled = !hasPlate || itemCount === 0;
+
+            // Bottom bar buttons
+            barDelete.disabled = !hasSelection;
+            barUndelete.disabled = !canUndo;
+            barMerge.disabled = !hasMultiSelection;
+            barCut.disabled = !hasSelection;
+            barIsolate.disabled = !hasPlate || itemCount === 0;
+            barDeleteVisible.disabled = !hasPlate || itemCount === 0;
+            barFlash.disabled = !hasPlate || itemCount === 0;
+
+            // Update flash button active state
+            barFlash.classList.toggle('active', flashInterval !== null);
         }
 
         function selectAll() {
@@ -1590,6 +1912,154 @@
                 }, 400);  // Flash every 400ms
                 showToast('Flashing polygons (press F to stop)', 'info');
             }
+        }
+
+        // Drawing mode functions
+        function enterDrawingMode() {
+            if (!currentPlate) {
+                showToast('Load a plate first', 'error');
+                return;
+            }
+            if (currentSvgType !== 'plate') {
+                showToast('Drawing only supported in plate mode', 'error');
+                return;
+            }
+            isDrawingMode = true;
+            drawingPoints = [];
+            document.body.classList.add('drawing-mode');
+            document.getElementById('drawing-indicator').classList.add('active');
+            selectedIds.clear();
+            updateSelection();
+            showToast('Drawing mode: click to add points', 'info');
+        }
+
+        function exitDrawingMode(save = false) {
+            if (save && drawingPoints.length >= 3) {
+                // Create new polygon from drawing points
+                const pointsStr = drawingPoints.map(p => `${Math.round(p.x)},${Math.round(p.y)}`).join(' ');
+                const newId = polygons.length + 1;
+                const newName = `b-${String(newId).padStart(4, '0')}`;
+
+                polygons.push({
+                    id: newName,
+                    name: newName,
+                    points: pointsStr,
+                    fill: 'rgba(102,179,92,0.3)',
+                    stroke: 'rgb(102,179,92)',
+                    originalIndex: polygons.length
+                });
+
+                hasChanges = true;
+                renderSVG(currentSvgData);
+                renderBlockList();
+                updateTabCounts();
+                updateStatus();
+                updateButtons();
+
+                showToast(`Created new block: ${newName}`, 'success');
+            }
+
+            isDrawingMode = false;
+            drawingPoints = [];
+            document.body.classList.remove('drawing-mode');
+            document.getElementById('drawing-indicator').classList.remove('active');
+            removeDrawingOverlay();
+        }
+
+        function addDrawingPoint(x, y) {
+            // Check if clicking near first point to close polygon
+            if (drawingPoints.length >= 3) {
+                const firstPoint = drawingPoints[0];
+                const distance = Math.sqrt(Math.pow(x - firstPoint.x, 2) + Math.pow(y - firstPoint.y, 2));
+                const closeThreshold = 15 / zoom;  // Adjust threshold based on zoom
+
+                if (distance < closeThreshold) {
+                    // Close the polygon
+                    exitDrawingMode(true);
+                    return;
+                }
+            }
+
+            drawingPoints.push({ x, y });
+            updateDrawingOverlay();
+        }
+
+        function updateDrawingOverlay() {
+            removeDrawingOverlay();
+
+            if (drawingPoints.length === 0) return;
+
+            // Create a group for drawing overlay
+            const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+            group.id = 'drawing-overlay';
+
+            // Draw the polygon preview if we have at least 2 points
+            if (drawingPoints.length >= 2) {
+                const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+                const pointsStr = drawingPoints.map(p => `${p.x},${p.y}`).join(' ');
+                polygon.setAttribute('points', pointsStr);
+                polygon.classList.add('drawing-preview');
+                group.appendChild(polygon);
+            } else if (drawingPoints.length === 1) {
+                // Draw a line from first point if only one point
+            }
+
+            // Draw lines connecting points
+            if (drawingPoints.length >= 2) {
+                const polyline = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+                const pointsStr = drawingPoints.map(p => `${p.x},${p.y}`).join(' ');
+                polyline.setAttribute('points', pointsStr);
+                polyline.classList.add('drawing-line');
+                group.appendChild(polyline);
+            }
+
+            // Draw points
+            drawingPoints.forEach((point, idx) => {
+                const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                circle.setAttribute('cx', point.x);
+                circle.setAttribute('cy', point.y);
+                circle.setAttribute('r', 6 / zoom);  // Scale point size with zoom
+                circle.classList.add('drawing-point');
+                if (idx === 0 && drawingPoints.length >= 3) {
+                    circle.classList.add('first-point');
+                }
+                group.appendChild(circle);
+
+                // Add "1" label inside the first point
+                if (idx === 0) {
+                    const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                    label.setAttribute('x', point.x);
+                    label.setAttribute('y', point.y);
+                    label.setAttribute('text-anchor', 'middle');
+                    label.setAttribute('dominant-baseline', 'central');
+                    label.setAttribute('font-size', `${10 / zoom}px`);
+                    label.setAttribute('font-weight', 'bold');
+                    label.setAttribute('fill', 'white');
+                    label.setAttribute('pointer-events', 'none');
+                    label.textContent = '1';
+                    group.appendChild(label);
+                }
+            });
+
+            svgCanvas.appendChild(group);
+        }
+
+        function removeDrawingOverlay() {
+            const existing = document.getElementById('drawing-overlay');
+            if (existing) {
+                existing.remove();
+            }
+        }
+
+        function handleCanvasClick(e) {
+            if (!isDrawingMode) return;
+
+            // Get click coordinates in SVG space
+            const rect = svgCanvas.getBoundingClientRect();
+            const x = (e.clientX - rect.left) / zoom;
+            const y = (e.clientY - rect.top) / zoom;
+
+            addDrawingPoint(x, y);
         }
 
         function deleteSelected() {
@@ -1987,6 +2457,9 @@
         const svgContainer = document.getElementById('svg-container');
 
         canvasWrapper.addEventListener('mousedown', (e) => {
+            // Don't start panning if in drawing mode
+            if (isDrawingMode) return;
+
             if (e.target === canvasWrapper || e.target === svgContainer || e.target === svgCanvas || e.target.tagName === 'image') {
                 isPanning = true;
                 panStartX = e.clientX;
@@ -2059,6 +2532,14 @@
             }
         });
 
+        // Handle clicks on SVG canvas for drawing mode
+        svgCanvas.addEventListener('click', (e) => {
+            if (isDrawingMode) {
+                e.stopPropagation();
+                handleCanvasClick(e);
+            }
+        });
+
         function setupEventListeners() {
             plateSelect.addEventListener('change', () => {
                 const idx = plateSelect.value;
@@ -2092,6 +2573,28 @@
             btnZoomOut.addEventListener('click', zoomOut);
             btnZoomFit.addEventListener('click', fitToView);
 
+            // Bottom bar buttons
+            barDelete.addEventListener('click', deleteSelected);
+            barUndelete.addEventListener('click', undoDelete);
+            barMerge.addEventListener('click', mergeSelected);
+            barCut.addEventListener('click', cutSelectedFromAll);
+            barIsolate.addEventListener('click', isolateSmall);
+            barDeleteVisible.addEventListener('click', deleteVisible);
+            barFlash.addEventListener('click', toggleFlash);
+
+            // Help modal
+            barHelp.addEventListener('click', () => {
+                helpModal.classList.add('active');
+            });
+            modalClose.addEventListener('click', () => {
+                helpModal.classList.remove('active');
+            });
+            helpModal.addEventListener('click', (e) => {
+                if (e.target === helpModal) {
+                    helpModal.classList.remove('active');
+                }
+            });
+
             // Tab switching
             document.querySelectorAll('.sidebar-tab').forEach(tab => {
                 tab.addEventListener('click', () => {
@@ -2102,6 +2605,22 @@
             // Keyboard shortcuts
             document.addEventListener('keydown', (e) => {
                 if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+                // Handle Escape first - it can cancel drawing mode or close modal
+                if (e.key === 'Escape') {
+                    if (helpModal.classList.contains('active')) {
+                        helpModal.classList.remove('active');
+                    } else if (isDrawingMode) {
+                        exitDrawingMode(false);  // Cancel without saving
+                        showToast('Drawing cancelled', 'info');
+                    } else {
+                        deselectAll();
+                    }
+                    return;
+                }
+
+                // Don't process other shortcuts in drawing mode
+                if (isDrawingMode) return;
 
                 if (e.key === 'Delete' || e.key === 'Backspace') {
                     e.preventDefault();
@@ -2133,20 +2652,24 @@
                 } else if (e.key === 'f' || e.key === 'F') {
                     e.preventDefault();
                     toggleFlash();
+                } else if (e.key === 'n' || e.key === 'N') {
+                    e.preventDefault();
+                    enterDrawingMode();
                 } else if ((e.ctrlKey || e.metaKey) && e.key === 's') {
                     e.preventDefault();
                     saveChanges();
                 } else if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
                     e.preventDefault();
                     selectAll();
-                } else if (e.key === 'Escape') {
-                    deselectAll();
                 } else if (e.key === '=' || e.key === '+') {
                     zoomIn();
                 } else if (e.key === '-') {
                     zoomOut();
                 } else if (e.key === '0') {
                     fitToView();
+                } else if (e.key === '?' || (e.shiftKey && e.key === '/')) {
+                    e.preventDefault();
+                    helpModal.classList.add('active');
                 }
             });
 
