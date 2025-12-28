@@ -236,11 +236,16 @@ def get_jpeg_path_from_svg(svg_path: Path) -> Optional[Path]:
 
 
 def get_plates() -> list[dict]:
-    """Get list of available plates with their SVG files."""
-    plates = []
+    """Get list of available plates with their SVG files.
+
+    Plates are sorted so that folders WITHOUT segmentation.svg come first,
+    making it easier to work through plates that still need manual inspection.
+    """
+    plates_without_segmentation = []
+    plates_with_segmentation = []
 
     if not OUTPUT_DIR.exists():
-        return plates
+        return []
 
     for volume_dir in sorted(OUTPUT_DIR.iterdir(), key=natural_sort_key):
         if not volume_dir.is_dir():
@@ -264,20 +269,26 @@ def get_plates() -> list[dict]:
                 if jpeg_path is not None:
                     has_jpeg = jpeg_path.exists()
 
+            has_segmentation = segmentation_svg.exists()
+
             # Add plate.svg entry if exists
             if plate_svg.exists():
-                plates.append({
+                entry = {
                     "volume": volume,
                     "plate_id": plate_id,
                     "svg_path": str(plate_svg),
                     "jpeg_path": str(jpeg_path) if has_jpeg else None,
                     "has_jpeg": has_jpeg,
                     "svg_type": "plate"
-                })
+                }
+                if has_segmentation:
+                    plates_with_segmentation.append(entry)
+                else:
+                    plates_without_segmentation.append(entry)
 
             # Add segmentation.svg entry if exists
-            if segmentation_svg.exists():
-                plates.append({
+            if has_segmentation:
+                plates_with_segmentation.append({
                     "volume": volume,
                     "plate_id": plate_id,
                     "svg_path": str(segmentation_svg),
@@ -286,7 +297,8 @@ def get_plates() -> list[dict]:
                     "svg_type": "segmentation"
                 })
 
-    return plates
+    # Return plates without segmentation first, then those with segmentation
+    return plates_without_segmentation + plates_with_segmentation
 
 
 def load_svg_data(svg_path: str) -> dict:
