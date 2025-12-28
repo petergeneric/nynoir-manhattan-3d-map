@@ -286,13 +286,13 @@ def create_alpha_mask(polygons: list[list[tuple[float, float]]], width: int, hei
     return mask
 
 
-def generate_thumbnail(plate_svg_path: Path, cache_path: Path) -> bool:
-    """Generate a thumbnail with polygon alpha mask and save to cache."""
+def generate_thumbnail_image(plate_svg_path: Path) -> Image.Image | None:
+    """Generate a thumbnail image with polygon alpha mask."""
     # Get JP2 path from SVG
     jp2_path = get_jp2_path_from_svg(plate_svg_path)
     if jp2_path is None or not jp2_path.exists():
         print(f"JP2 file not found: {jp2_path}")
-        return False
+        return None
 
     try:
         # Load the JP2 image
@@ -318,16 +318,23 @@ def generate_thumbnail(plate_svg_path: Path, cache_path: Path) -> bool:
         new_height = int(height * 0.1)
         img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
 
-        # Ensure cache directory exists
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Save as PNG with transparency
-        img.save(cache_path, 'PNG')
-        print(f"Generated thumbnail: {cache_path}")
-        return True
+        return img
 
     except Exception as e:
         print(f"Error generating thumbnail: {e}")
+        return None
+
+
+def save_thumbnail_to_cache(img: Image.Image, cache_path: Path) -> bool:
+    """Try to save thumbnail to cache. Returns True on success."""
+    try:
+        # Ensure cache directory exists
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        img.save(cache_path, 'PNG')
+        print(f"Cached thumbnail: {cache_path}")
+        return True
+    except Exception as e:
+        print(f"Could not cache thumbnail (permission denied?): {e}")
         return False
 
 
@@ -372,6 +379,8 @@ def api_save_plate(volume, plate_id):
 @app.route('/api/plate/<volume>/<plate_id>/thumb')
 def api_plate_thumbnail(volume, plate_id):
     """Generate and serve a plate thumbnail with polygon alpha mask."""
+    import io
+
     # Construct paths
     plate_svg_path = OUTPUT_DIR / volume / plate_id / "plate.svg"
 
@@ -390,20 +399,32 @@ def api_plate_thumbnail(volume, plate_id):
     cache_path = jp2_path.parent / f"{plate_id}.thumb.png"
 
     # Check if cache is valid (exists and newer than SVG)
-    regenerate = True
+    use_cache = False
     if cache_path.exists():
-        cache_mtime = cache_path.stat().st_mtime
-        svg_mtime = plate_svg_path.stat().st_mtime
-        if cache_mtime > svg_mtime:
-            regenerate = False
+        try:
+            cache_mtime = cache_path.stat().st_mtime
+            svg_mtime = plate_svg_path.stat().st_mtime
+            if cache_mtime > svg_mtime:
+                use_cache = True
+        except Exception:
+            pass
 
-    # Generate if needed
-    if regenerate:
-        if not generate_thumbnail(plate_svg_path, cache_path):
-            return jsonify({"error": "Failed to generate thumbnail"}), 500
+    if use_cache:
+        return send_file(cache_path, mimetype='image/png')
 
-    # Serve the cached file
-    return send_file(cache_path, mimetype='image/png')
+    # Generate thumbnail
+    img = generate_thumbnail_image(plate_svg_path)
+    if img is None:
+        return jsonify({"error": "Failed to generate thumbnail"}), 500
+
+    # Try to cache it (may fail due to permissions)
+    save_thumbnail_to_cache(img, cache_path)
+
+    # Serve from memory
+    img_io = io.BytesIO()
+    img.save(img_io, 'PNG')
+    img_io.seek(0)
+    return send_file(img_io, mimetype='image/png')
 
 
 @app.route('/media/<path:filename>')
@@ -418,35 +439,94 @@ def serve_overview(filename):
     return send_from_directory(OVERVIEW_DIR, filename)
 
 
-@app.route('/api/reference-map')
-def api_get_reference_map():
-    """Get reference map alignment metadata."""
-    json_path = OVERVIEW_DIR / "section1.metadata.json"
-    if json_path.exists():
+def get_reference_map_info(volume: str) -> dict:
+    """Get reference map path and metadata path for a volume."""
+    if volume == "vol1":
+        # vol1 uses the legacy overview directory
+        return {
+            "image_path": OVERVIEW_DIR / "section1.jpeg",
+            "metadata_path": OVERVIEW_DIR / "section1.metadata.json",
+            "image_url": "/media/overview/section1.jpeg"
+        }
+    else:
+        # Other volumes use their index directory
+        # e.g., vol2 -> ../media/v2/index/overview.jpeg
+        volume_num = volume.replace("vol", "")
+        base_dir = MEDIA_DIR.parent / f"v{volume_num}" / "index"
+        return {
+            "image_path": base_dir / "overview.jpeg",
+            "metadata_path": base_dir / "overview.metadata.json",
+            "image_url": f"/api/volume/{volume}/reference-map/image"
+        }
+
+
+@app.route('/api/volume/<volume>/reference-map')
+def api_get_volume_reference_map(volume):
+    """Get reference map info and alignment metadata for a volume."""
+    info = get_reference_map_info(volume)
+
+    result = {
+        "volume": volume,
+        "image_url": info["image_url"],
+        "has_image": info["image_path"].exists(),
+        "has_alignment": False
+    }
+
+    if info["metadata_path"].exists():
         try:
-            with open(json_path) as f:
+            with open(info["metadata_path"]) as f:
                 data = json.load(f)
-                return jsonify({"has_alignment": True, "angle": data.get("angle", 0)})
+                result["has_alignment"] = True
+                result["angle"] = data.get("angle", 0)
         except Exception as e:
             print(f"Error reading reference map metadata: {e}")
-    return jsonify({"has_alignment": False})
+
+    return jsonify(result)
 
 
-@app.route('/api/reference-map/save', methods=['POST'])
-def api_save_reference_map():
-    """Save reference map alignment metadata."""
+@app.route('/api/volume/<volume>/reference-map/image')
+def api_serve_volume_reference_image(volume):
+    """Serve the reference map image for a volume."""
+    info = get_reference_map_info(volume)
+
+    if not info["image_path"].exists():
+        return jsonify({"error": "Reference map not found"}), 404
+
+    return send_file(info["image_path"], mimetype='image/jpeg')
+
+
+@app.route('/api/volume/<volume>/reference-map/save', methods=['POST'])
+def api_save_volume_reference_map(volume):
+    """Save reference map alignment metadata for a volume."""
     data = request.json
 
     if 'angle' not in data:
         return jsonify({"error": "Missing angle field"}), 400
 
-    json_path = OVERVIEW_DIR / "section1.metadata.json"
+    info = get_reference_map_info(volume)
+
     try:
-        with open(json_path, 'w') as f:
+        # Ensure directory exists
+        info["metadata_path"].parent.mkdir(parents=True, exist_ok=True)
+
+        with open(info["metadata_path"], 'w') as f:
             json.dump({"angle": data['angle']}, f, indent=2)
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# Legacy routes for backwards compatibility
+@app.route('/api/reference-map')
+def api_get_reference_map():
+    """Get reference map alignment metadata (legacy, uses vol1)."""
+    return api_get_volume_reference_map("vol1")
+
+
+@app.route('/api/reference-map/save', methods=['POST'])
+def api_save_reference_map():
+    """Save reference map alignment metadata (legacy, uses vol1)."""
+    return api_save_volume_reference_map("vol1")
 
 
 # HTML Template (embedded)
@@ -1053,7 +1133,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         <div class="canvas-container">
             <div id="canvas-wrapper">
                 <div id="canvas-content">
-                    <img id="reference-map" src="/media/overview/section1.jpeg" alt="Reference Map" draggable="false">
+                    <img id="reference-map" src="" alt="Reference Map" draggable="false">
                     <div id="thumbnails-layer"></div>
                 </div>
             </div>
@@ -1113,9 +1193,11 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         // State
         let volumes = [];
         let currentPlate = null;
+        let currentVolume = 'vol1';  // Currently active volume for reference map
         let workflowStep = 0;  // 0=idle, 1-6=plate alignment, 10-11=reference map alignment
         let referenceMapAngle = 0;
         let referenceMapAligned = false;
+        let referenceMapUrl = '/media/overview/section1.jpeg';  // Current reference map URL
         let calibrationData = {
             anglePoints: [],      // [{x, y}, {x, y}] south->north
             scalePoints: [],      // [{x, y}, {x, y}] for distance
@@ -1162,15 +1244,65 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 
         // Initialize
         async function init() {
-            await loadReferenceMapAlignment();
             await loadVolumes();
+            // Default to vol1, but if there are vol2 plates and no vol1, switch
+            if (volumes.length > 0) {
+                currentVolume = volumes[0].name;
+            }
+            await switchReferenceMap(currentVolume);
             setupEventListeners();
             fitToView();
         }
 
-        async function loadReferenceMapAlignment() {
+        async function switchReferenceMap(volume) {
+            if (volume === currentVolume && referenceMapUrl) {
+                // Already on this volume's map, just reload alignment
+                await loadReferenceMapAlignment(volume);
+                return;
+            }
+
+            currentVolume = volume;
+
             try {
-                const response = await fetch('/api/reference-map');
+                const response = await fetch(`/api/volume/${volume}/reference-map`);
+                const data = await response.json();
+
+                if (data.has_image) {
+                    referenceMapUrl = data.image_url;
+                    referenceMap.src = referenceMapUrl;
+
+                    if (data.has_alignment) {
+                        referenceMapAngle = data.angle;
+                        referenceMapAligned = true;
+                    } else {
+                        referenceMapAngle = 0;
+                        referenceMapAligned = false;
+                    }
+
+                    applyReferenceMapRotation();
+                    updateAlignMapButton();
+
+                    // Clear thumbnails - they belong to a different volume
+                    thumbnailsLayer.innerHTML = '';
+
+                    // Re-render thumbnails for plates on this volume that have alignment
+                    renderAlignedThumbnails();
+
+                    if (!referenceMapAligned) {
+                        showToast(`Reference map for ${volume} needs alignment`, 'warning');
+                    }
+                } else {
+                    showToast(`No reference map found for ${volume}`, 'error');
+                }
+            } catch (error) {
+                console.error('Failed to switch reference map:', error);
+                showToast('Failed to load reference map', 'error');
+            }
+        }
+
+        async function loadReferenceMapAlignment(volume = currentVolume) {
+            try {
+                const response = await fetch(`/api/volume/${volume}/reference-map`);
                 const data = await response.json();
                 if (data.has_alignment) {
                     referenceMapAngle = data.angle;
@@ -1190,18 +1322,16 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         function updateAlignMapButton() {
             if (referenceMapAligned) {
                 btnAlignMap.classList.add('aligned');
-                btnAlignMap.textContent = 'Map Aligned';
+                btnAlignMap.textContent = `${currentVolume} Aligned`;
             } else {
                 btnAlignMap.classList.remove('aligned');
-                btnAlignMap.textContent = 'Align Map';
+                btnAlignMap.textContent = `Align ${currentVolume}`;
             }
         }
 
         function applyReferenceMapRotation() {
-            if (referenceMapAngle !== 0) {
-                referenceMap.style.transformOrigin = 'center center';
-                referenceMap.style.transform = `rotate(${referenceMapAngle}deg)`;
-            }
+            referenceMap.style.transformOrigin = 'center center';
+            referenceMap.style.transform = referenceMapAngle !== 0 ? `rotate(${referenceMapAngle}deg)` : '';
         }
 
         function startReferenceMapAlignment() {
@@ -1209,18 +1339,18 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             calibrationData.anglePoints = [];
 
             // Show modal with reference map image
-            modalTitle.textContent = 'Align Reference Map';
-            modalImage.src = '/media/overview/section1.jpeg';
+            modalTitle.textContent = `Align Reference Map (${currentVolume})`;
+            modalImage.src = referenceMapUrl;
             modal.classList.add('active');
 
             stepIndicator.textContent = 'Step 1 of 2';
             modalInstructions.textContent = 'Click the SOUTH point on the compass';
-            statusEl.textContent = 'Aligning reference map...';
+            statusEl.textContent = `Aligning ${currentVolume} reference map...`;
         }
 
         async function saveReferenceMapAlignment() {
             try {
-                const response = await fetch('/api/reference-map/save', {
+                const response = await fetch(`/api/volume/${currentVolume}/reference-map/save`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ angle: referenceMapAngle })
@@ -1231,7 +1361,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     referenceMapAligned = true;
                     applyReferenceMapRotation();
                     updateAlignMapButton();
-                    showToast('Reference map alignment saved', 'success');
+                    showToast(`Reference map alignment saved for ${currentVolume}`, 'success');
                 } else {
                     showToast('Failed to save: ' + result.error, 'error');
                 }
@@ -1296,13 +1426,15 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         function renderAlignedThumbnails() {
             thumbnailsLayer.innerHTML = '';
 
-            volumes.forEach(volume => {
+            // Only render thumbnails for the current volume
+            const volume = volumes.find(v => v.name === currentVolume);
+            if (volume) {
                 volume.plates.forEach(plate => {
                     if (plate.has_alignment && plate.alignment && plate.has_thumb) {
                         createThumbnail(volume.name, plate);
                     }
                 });
-            });
+            }
         }
 
         function createThumbnail(volumeName, plate) {
@@ -1341,12 +1473,17 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             img.style.transform = `translate(-50%, -50%) rotate(${angle}deg) scale(${scale})`;
         }
 
-        function selectPlate(volumeName, plate) {
+        async function selectPlate(volumeName, plate) {
+            // Switch reference map if volume changed
+            if (volumeName !== currentVolume) {
+                await switchReferenceMap(volumeName);
+            }
+
             // Deselect previous
             document.querySelectorAll('.plate-item.active').forEach(el => el.classList.remove('active'));
 
             // Select new
-            const item = document.querySelector(`.plate-item[data-plate-id="${plate.plate_id}"]`);
+            const item = document.querySelector(`.plate-item[data-plate-id="${plate.plate_id}"][data-volume="${volumeName}"]`);
             if (item) item.classList.add('active');
 
             currentPlate = { ...plate, volume: volumeName };
