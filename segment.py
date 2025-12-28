@@ -1175,20 +1175,55 @@ def filter_contours_outside_block(
 #   - seg_polygon: ShapelyPolygon of the segment
 #   - block_polygon: ShapelyPolygon of the block boundary
 #   - block_bbox: BoundingBox of the block
+#   - plate_width: Width of the full plate
+#   - plate_height: Height of the full plate
 # Returns True to keep the polygon, False to cull it.
 
 def cull_outside_block(
     seg_polygon: ShapelyPolygon,
     block_polygon: ShapelyPolygon,
-    block_bbox: BoundingBox
+    block_bbox: BoundingBox,
+    plate_width: int,
+    plate_height: int
 ) -> bool:
     """Keep polygons that intersect the block boundary."""
     return block_polygon.intersects(seg_polygon)
 
 
+def cull_large_area_relative_to_plate(
+    seg_polygon: ShapelyPolygon,
+    block_polygon: ShapelyPolygon,
+    block_bbox: BoundingBox,
+    plate_width: int,
+    plate_height: int
+) -> bool:
+    """Cull polygons with area > 50% of plate viewbox area."""
+    plate_area = plate_width * plate_height
+    max_area = plate_area * 0.5
+    return seg_polygon.area <= max_area
+
+
+def cull_tall_relative_to_plate(
+    seg_polygon: ShapelyPolygon,
+    block_polygon: ShapelyPolygon,
+    block_bbox: BoundingBox,
+    plate_width: int,
+    plate_height: int
+) -> bool:
+    """Cull polygons with height > 80% of plate viewbox height."""
+    # Get polygon bounding box (minx, miny, maxx, maxy)
+    minx, miny, maxx, maxy = seg_polygon.bounds
+    # Height in local block coordinates - need to compare to plate height
+    polygon_height = maxy - miny
+    max_height = plate_height * 0.8
+    return polygon_height <= max_height
+
+
 # Registry of all cull filters to apply (add new filters here)
 CULL_FILTERS = [
     ("outside_block", cull_outside_block),
+    ("large_area_relative_to_plate", cull_large_area_relative_to_plate),
+    ("tall_relative_to_plate", cull_tall_relative_to_plate),
 ]
 
 
@@ -1210,7 +1245,9 @@ def format_svg_polygon_points(points: List[Tuple[float, float]]) -> str:
 def apply_cull_filters_to_block_svg(
     block_svg_content: str,
     block_contour: np.ndarray,
-    block_bbox: BoundingBox
+    block_bbox: BoundingBox,
+    plate_width: int,
+    plate_height: int
 ) -> Tuple[str, int, int]:
     """Apply all cull filters to polygons in a block SVG.
 
@@ -1218,6 +1255,8 @@ def apply_cull_filters_to_block_svg(
         block_svg_content: The SVG file content as a string
         block_contour: The block polygon contour in plate coordinates
         block_bbox: The bounding box of the block
+        plate_width: Width of the full plate
+        plate_height: Height of the full plate
 
     Returns:
         Tuple of (filtered_svg_content, original_count, filtered_count)
@@ -1260,7 +1299,7 @@ def apply_cull_filters_to_block_svg(
             # Apply all cull filters - polygon must pass ALL filters to be kept
             keep = True
             for filter_name, filter_func in CULL_FILTERS:
-                if not filter_func(seg_polygon, block_polygon, block_bbox):
+                if not filter_func(seg_polygon, block_polygon, block_bbox, plate_width, plate_height):
                     keep = False
                     break
 
@@ -1962,7 +2001,9 @@ def process_combine(
                 filtered_content, orig_count, filt_count = apply_cull_filters_to_block_svg(
                     block_svg_content,
                     new_block.contours[0],
-                    new_block.bbox
+                    new_block.bbox,
+                    metadata.image_width,
+                    metadata.image_height
                 )
 
                 culled = orig_count - filt_count
