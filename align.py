@@ -511,21 +511,63 @@ def api_serve_volume_reference_image(volume):
 
 @app.route('/api/volume/<volume>/reference-map/save', methods=['POST'])
 def api_save_volume_reference_map(volume):
-    """Save reference map alignment metadata for a volume."""
+    """Save reference map alignment metadata for a volume and adjust plate angles."""
     data = request.json
 
     if 'angle' not in data:
         return jsonify({"error": "Missing angle field"}), 400
 
+    new_angle = data['angle']
     info = get_reference_map_info(volume)
+
+    # Get old angle to calculate delta
+    old_angle = 0
+    if info["metadata_path"].exists():
+        try:
+            with open(info["metadata_path"]) as f:
+                old_data = json.load(f)
+                old_angle = old_data.get("angle", 0)
+        except Exception:
+            pass
+
+    angle_delta = new_angle - old_angle
+    plates_adjusted = 0
+
+    # Adjust all plate alignments in this volume to compensate
+    if angle_delta != 0:
+        volume_dir = OUTPUT_DIR / volume
+        if volume_dir.exists():
+            for plate_dir in volume_dir.iterdir():
+                if not plate_dir.is_dir():
+                    continue
+                plate_svg = plate_dir / "plate.svg"
+                if not plate_svg.exists():
+                    continue
+
+                plate_id = plate_dir.name
+                alignment = load_plate_alignment(plate_svg, plate_id)
+
+                if alignment.get("has_alignment"):
+                    # Subtract the delta to compensate for reference map rotation
+                    adjusted_alignment = {
+                        "angle": alignment["angle"] - angle_delta,
+                        "scale": alignment["scale"],
+                        "pos": alignment["pos"]
+                    }
+                    save_plate_alignment(volume, plate_id, adjusted_alignment)
+                    plates_adjusted += 1
 
     try:
         # Ensure directory exists
         info["metadata_path"].parent.mkdir(parents=True, exist_ok=True)
 
         with open(info["metadata_path"], 'w') as f:
-            json.dump({"angle": data['angle']}, f, indent=2)
-        return jsonify({"success": True})
+            json.dump({"angle": new_angle}, f, indent=2)
+        return jsonify({
+            "success": True,
+            "angle_delta": angle_delta,
+            "plates_adjusted": plates_adjusted
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1397,7 +1439,16 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     referenceMapAligned = true;
                     applyReferenceMapRotation();
                     updateAlignMapButton();
-                    showToast(`Reference map alignment saved for ${currentVolume}`, 'success');
+
+                    // Show message including plates adjusted
+                    let msg = `Reference map alignment saved for ${currentVolume}`;
+                    if (result.plates_adjusted > 0) {
+                        msg += ` (${result.plates_adjusted} plate${result.plates_adjusted > 1 ? 's' : ''} adjusted by ${result.angle_delta.toFixed(1)}°)`;
+                    }
+                    showToast(msg, 'success');
+
+                    // Reload plate data and re-render thumbnails with adjusted angles
+                    await loadVolumes();
                 } else {
                     showToast('Failed to save: ' + result.error, 'error');
                 }
