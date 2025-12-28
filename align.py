@@ -391,18 +391,8 @@ def api_plate_thumbnail(volume, plate_id):
     # Cache path is alongside the JP2 file
     cache_path = jp2_path.parent / f"{plate_id}.thumb.png"
 
-    # Check if cache is valid (exists and newer than SVG)
-    use_cache = False
+    # Use cached thumbnail if it exists (manual invalidation)
     if cache_path.exists():
-        try:
-            cache_mtime = cache_path.stat().st_mtime
-            svg_mtime = plate_svg_path.stat().st_mtime
-            if cache_mtime > svg_mtime:
-                use_cache = True
-        except Exception:
-            pass
-
-    if use_cache:
         return send_file(cache_path, mimetype='image/png')
 
     # Generate thumbnail
@@ -548,9 +538,9 @@ def api_save_volume_reference_map(volume):
                 alignment = load_plate_alignment(plate_svg, plate_id)
 
                 if alignment.get("has_alignment"):
-                    # Subtract the delta to compensate for reference map rotation
+                    # Add the delta to compensate for reference map rotation
                     adjusted_alignment = {
-                        "angle": alignment["angle"] - angle_delta,
+                        "angle": alignment["angle"] + angle_delta,
                         "scale": alignment["scale"],
                         "pos": alignment["pos"]
                     }
