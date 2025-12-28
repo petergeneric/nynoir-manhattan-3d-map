@@ -130,19 +130,35 @@ class CombinedPolygon:
     data_id: Optional[str] = None
 
 
-def parse_segmentation_json(json_path: Path) -> List[PlateEntry]:
+def parse_segmentation_json(json_path: Path) -> Tuple[List[PlateEntry], float]:
     """Parse the segmentation.json file.
 
     Uses JSON5 which tolerates trailing commas and unquoted keys.
     Skips entries where the SVG file doesn't exist.
+
+    The manifest format supports both legacy (array) and new (object with rotation) formats:
+    - Legacy: [{file:..., scale:...}, ...]
+    - New: {rotation: 0, entries: [{file:..., scale:...}, ...]}
+
+    Returns:
+        Tuple of (list of PlateEntry, rotation angle in degrees)
     """
     content = json_path.read_text()
     data = json5.loads(content)
 
+    # Handle both legacy array format and new object format
+    rotation = 0.0
+    if isinstance(data, dict):
+        rotation = data.get("rotation", 0.0)
+        items = data.get("entries", [])
+    else:
+        # Legacy array format
+        items = data
+
     entries = []
     base_dir = json_path.parent
 
-    for item in data:
+    for item in items:
         svg_path = (base_dir / item["file"]).resolve()
         metadata_path = (base_dir / item["scale"]).resolve()
 
@@ -152,7 +168,7 @@ def parse_segmentation_json(json_path: Path) -> List[PlateEntry]:
 
         entries.append(PlateEntry(svg_path=svg_path, metadata_path=metadata_path))
 
-    return entries
+    return entries, rotation
 
 
 def parse_svg_polygon_points(points_str: str) -> List[Tuple[float, float]]:
@@ -723,8 +739,11 @@ def main():
 
     # Parse input
     print(f"Reading {args.input_json}")
-    entries = parse_segmentation_json(args.input_json)
-    print(f"Found {len(entries)} plates to combine\n")
+    entries, rotation = parse_segmentation_json(args.input_json)
+    print(f"Found {len(entries)} plates to combine")
+    if rotation != 0:
+        print(f"Manifest rotation: {rotation}° (applied in generate_stl.py)")
+    print()
 
     # Process and combine
     polygons, bbox = combine_plates(entries, skip_outlines=args.skip_outlines)

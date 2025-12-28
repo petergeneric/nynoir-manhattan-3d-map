@@ -13,12 +13,14 @@ Block context is tracked for each shape to enable context-aware height generatio
 import re
 import random
 import argparse
+import math
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
+import json5
 import numpy as np
 import trimesh
 from shapely.geometry import Polygon as ShapelyPolygon
@@ -587,6 +589,51 @@ def simplify_polygon(points: List[Tuple[float, float]],
     except Exception:
         # If simplification fails, return original
         return points
+
+
+def rotate_points(points: List[Tuple[float, float]],
+                   angle_degrees: float,
+                   center: Optional[Tuple[float, float]] = None
+                   ) -> List[Tuple[float, float]]:
+    """Rotate points around a center point.
+
+    Args:
+        points: List of (x, y) tuples to rotate
+        angle_degrees: Rotation angle in degrees (positive = counter-clockwise)
+        center: Center of rotation. If None, uses the centroid of the points.
+
+    Returns:
+        List of rotated (x, y) tuples
+    """
+    if not points or angle_degrees == 0:
+        return points
+
+    # Calculate center if not provided
+    if center is None:
+        cx = sum(p[0] for p in points) / len(points)
+        cy = sum(p[1] for p in points) / len(points)
+    else:
+        cx, cy = center
+
+    # Convert angle to radians
+    angle_rad = math.radians(angle_degrees)
+    cos_a = math.cos(angle_rad)
+    sin_a = math.sin(angle_rad)
+
+    rotated = []
+    for x, y in points:
+        # Translate to origin
+        px = x - cx
+        py = y - cy
+
+        # Rotate
+        rx = px * cos_a - py * sin_a
+        ry = px * sin_a + py * cos_a
+
+        # Translate back
+        rotated.append((rx + cx, ry + cy))
+
+    return rotated
 
 
 def get_weighted_random_stories():
@@ -1171,6 +1218,15 @@ Examples:
             print(f"Error: Manifest file not found: {manifest_path}")
             return 1
 
+        # Read manifest to get rotation angle
+        manifest_content = manifest_path.read_text()
+        manifest_data = json5.loads(manifest_content)
+
+        # Handle both legacy array format and new object format
+        rotation_angle = 0.0
+        if isinstance(manifest_data, dict):
+            rotation_angle = manifest_data.get("rotation", 0.0)
+
         # Create temp file for combined SVG
         tmp_dir = Path("/tmp/claude")
         tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -1211,6 +1267,24 @@ Examples:
             print(f"Error: No shapes found in combined SVG: {combined_svg}")
             return 1
 
+        # Calculate center of all shapes for rotation
+        all_x = []
+        all_y = []
+        for shape in seg_data.shapes:
+            for x, y in shape.points:
+                all_x.append(x)
+                all_y.append(y)
+
+        if all_x and all_y:
+            center_x = (min(all_x) + max(all_x)) / 2
+            center_y = (min(all_y) + max(all_y)) / 2
+            rotation_center = (center_x, center_y)
+        else:
+            rotation_center = (0, 0)
+
+        if rotation_angle != 0:
+            print(f"Applying rotation: {rotation_angle}° around center ({rotation_center[0]:.1f}, {rotation_center[1]:.1f})")
+
         all_triangles = []
         successful_buildings = 0
         skipped_buildings = 0
@@ -1221,6 +1295,10 @@ Examples:
 
             if len(points) < 3:
                 continue
+
+            # Apply rotation if specified in manifest
+            if rotation_angle != 0:
+                points = rotate_points(points, rotation_angle, rotation_center)
 
             height = get_height_for_shape(shape, seg_data, height_config)
 
