@@ -8,7 +8,7 @@
       <atlas:plate-id>p8</atlas:plate-id>
       <atlas:image-width>4984</atlas:image-width>
       <atlas:image-height>3304</atlas:image-height>
-    </atlas:source>
+    <atlas:angle>0</atlas:angle><atlas:scale>1.3333333333333333</atlas:scale><atlas:pos-x>1448.1214185097572</atlas:pos-x><atlas:pos-y>2595.528374560198</atlas:pos-y></atlas:source>
   </metadata>
 
   

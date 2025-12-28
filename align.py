@@ -13,6 +13,7 @@ Usage:
 
 import argparse
 import json
+import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -38,6 +39,11 @@ REFERENCE_SCALE = 600  # Reference map scale: 1 inch = 600 feet
 THUMBNAIL_SCALE = 0.1  # Thumbnails at 10% of original size
 
 
+def natural_sort_key(path: Path) -> list:
+    """Sort key for natural ordering (p1, p2, ... p9, p10 instead of p1, p10, p2)."""
+    return [int(x) if x.isdigit() else x.lower() for x in re.split(r'(\d+)', path.name)]
+
+
 def get_volumes() -> list[dict]:
     """Get list of volumes with their plates and alignment status."""
     volumes = {}
@@ -56,7 +62,7 @@ def get_volumes() -> list[dict]:
                 "plates": []
             }
 
-        for plate_dir in sorted(volume_dir.iterdir()):
+        for plate_dir in sorted(volume_dir.iterdir(), key=natural_sort_key):
             if not plate_dir.is_dir():
                 continue
 
@@ -964,6 +970,15 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             background: #a52a2a;
         }
 
+        .modal-header button.skip-btn {
+            background: #0f3460;
+            margin-right: auto;
+        }
+
+        .modal-header button.skip-btn:hover {
+            background: #1a4a7a;
+        }
+
         .modal-content {
             flex: 1;
             overflow: auto;
@@ -1177,6 +1192,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             <h2 id="modal-title">Calibration</h2>
             <span class="step-indicator" id="step-indicator">Step 1 of 4</span>
             <span class="instructions" id="modal-instructions">Click the SOUTH point on the compass</span>
+            <button id="btn-skip-angle" class="skip-btn" style="display: none;">Skip Angle (use 0°)</button>
             <button id="btn-cancel-modal">Cancel</button>
         </div>
         <div class="modal-content" id="modal-content">
@@ -1225,7 +1241,8 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             angle: 0,
             scaleFactor: 0,
             position: {x: 0, y: 0},
-            opacity: 1.0
+            opacity: 1.0,
+            angleSkipped: false   // Track if angle calibration was skipped
         };
         let zoom = 0.5;
         let isDragging = false;
@@ -1259,6 +1276,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         const inputScale = document.getElementById('input-scale');
         const btnCancelInput = document.getElementById('btn-cancel-input');
         const btnConfirmInput = document.getElementById('btn-confirm-input');
+        const btnSkipAngle = document.getElementById('btn-skip-angle');
 
         // Initialize
         async function init() {
@@ -1574,7 +1592,8 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 angle: 0,
                 scaleFactor: 0,
                 position: {x: 0, y: 0},
-                opacity: 1.0
+                opacity: 1.0,
+                angleSkipped: false
             };
             workflowStep = 1;
 
@@ -1590,6 +1609,12 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         }
 
         function updateModalStep() {
+            // Show skip button only during angle steps (1-2)
+            btnSkipAngle.style.display = (workflowStep === 1 || workflowStep === 2) ? 'block' : 'none';
+
+            // Adjust step numbers based on whether angle was skipped
+            const totalSteps = calibrationData.angleSkipped ? 2 : 4;
+
             switch (workflowStep) {
                 case 1:
                     stepIndicator.textContent = 'Step 1 of 4';
@@ -1600,14 +1625,24 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     modalInstructions.textContent = 'Click the NORTH point on the compass';
                     break;
                 case 3:
-                    stepIndicator.textContent = 'Step 3 of 4';
+                    stepIndicator.textContent = calibrationData.angleSkipped ? 'Step 1 of 2' : 'Step 3 of 4';
                     modalInstructions.textContent = 'Click first point for scale measurement';
                     break;
                 case 4:
-                    stepIndicator.textContent = 'Step 4 of 4';
+                    stepIndicator.textContent = calibrationData.angleSkipped ? 'Step 2 of 2' : 'Step 4 of 4';
                     modalInstructions.textContent = 'Click second point for scale measurement';
                     break;
             }
+        }
+
+        function skipAngleCalibration() {
+            // Skip angle calibration - set angle to 0 and go directly to scale measurement
+            calibrationData.angle = 0;
+            calibrationData.anglePoints = [];
+            calibrationData.angleSkipped = true;
+            clearMarkers();
+            workflowStep = 3;
+            updateModalStep();
         }
 
         function handleModalClick(e) {
@@ -2038,6 +2073,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             // Modal
             modalImage.addEventListener('click', handleModalClick);
             btnCancelModal.addEventListener('click', cancelWorkflow);
+            btnSkipAngle.addEventListener('click', skipAngleCalibration);
 
             // Input panel
             btnCancelInput.addEventListener('click', () => {

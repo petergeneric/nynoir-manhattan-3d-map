@@ -8,7 +8,7 @@
       <atlas:plate-id>p19</atlas:plate-id>
       <atlas:image-width>5000</atlas:image-width>
       <atlas:image-height>3248</atlas:image-height>
-    </atlas:source>
+    <atlas:angle>0</atlas:angle><atlas:scale>1.3881418749260725</atlas:scale><atlas:pos-x>973.9477841029762</atlas:pos-x><atlas:pos-y>1831.153374613418</atlas:pos-y></atlas:source>
   </metadata>
 
   
