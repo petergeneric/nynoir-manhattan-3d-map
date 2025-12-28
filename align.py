@@ -17,6 +17,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from flask import Flask, jsonify, request, send_file, send_from_directory, Response
+from PIL import Image, ImageDraw
 
 app = Flask(__name__)
 
@@ -65,18 +66,25 @@ def get_volumes() -> list[dict]:
             if not plate_svg.exists():
                 continue
 
-            # Check for JPEG and thumbnail
-            jpeg_path = MEDIA_DIR / f"{plate_id}.jpeg"
-            thumb_path = MEDIA_DIR / f"{plate_id}.thumb.png"
+            # Get JP2 path from SVG metadata (ensures correct volume path)
+            jp2_path = get_jp2_path_from_svg(plate_svg)
+            has_jp2 = jp2_path is not None and jp2_path.exists()
+
+            # Check for JPEG in same directory as JP2
+            has_jpeg = False
+            if jp2_path is not None:
+                jpeg_path = jp2_path.parent / f"{plate_id}.jpeg"
+                has_jpeg = jpeg_path.exists()
 
             # Load alignment data
             alignment = load_plate_alignment(plate_svg, plate_id)
 
+            # has_thumb is True if we have a JP2 (thumbnails are generated on demand)
             volumes[volume_name]["plates"].append({
                 "plate_id": plate_id,
                 "has_svg": True,
-                "has_jpeg": jpeg_path.exists(),
-                "has_thumb": thumb_path.exists(),
+                "has_jpeg": has_jpeg,
+                "has_thumb": has_jp2,  # Can generate thumbnail if JP2 exists
                 "has_alignment": alignment.get("has_alignment", False),
                 "alignment": alignment if alignment.get("has_alignment") else None
             })
@@ -202,6 +210,127 @@ def save_plate_alignment(volume: str, plate_id: str, alignment: dict) -> dict:
     return results
 
 
+# Thumbnail generation helpers
+
+def get_jp2_path_from_svg(plate_svg_path: Path) -> Path | None:
+    """Extract JP2 path from plate.svg metadata."""
+    if not plate_svg_path.exists():
+        return None
+
+    try:
+        tree = ET.parse(plate_svg_path)
+        root = tree.getroot()
+
+        # Find metadata/source element
+        metadata_elem = root.find(f'.//{{{SVG_NS}}}metadata')
+        if metadata_elem is None:
+            metadata_elem = root.find('.//metadata')
+
+        if metadata_elem is not None:
+            source_elem = metadata_elem.find(f'.//{{{ATLAS_NS}}}source')
+            if source_elem is not None:
+                jp2_elem = source_elem.find(f'{{{ATLAS_NS}}}jp2-path')
+                if jp2_elem is not None and jp2_elem.text:
+                    return Path(jp2_elem.text)
+    except Exception as e:
+        print(f"Error reading JP2 path from plate.svg: {e}")
+
+    return None
+
+
+def extract_polygons_from_svg(plate_svg_path: Path) -> list[list[tuple[float, float]]]:
+    """Extract polygon coordinates from plate.svg."""
+    polygons = []
+
+    if not plate_svg_path.exists():
+        return polygons
+
+    try:
+        tree = ET.parse(plate_svg_path)
+        root = tree.getroot()
+
+        # Find all polygon elements
+        for polygon_elem in root.findall(f'.//{{{SVG_NS}}}polygon'):
+            points_str = polygon_elem.get('points', '')
+            if not points_str:
+                continue
+
+            # Parse points: "x1,y1 x2,y2 x3,y3 ..."
+            coords = []
+            for point in points_str.strip().split():
+                try:
+                    x, y = point.split(',')
+                    coords.append((float(x), float(y)))
+                except ValueError:
+                    continue
+
+            if len(coords) >= 3:
+                polygons.append(coords)
+    except Exception as e:
+        print(f"Error extracting polygons from plate.svg: {e}")
+
+    return polygons
+
+
+def create_alpha_mask(polygons: list[list[tuple[float, float]]], width: int, height: int) -> Image.Image:
+    """Create an alpha mask from polygon coordinates."""
+    # Create a blank mask (all transparent)
+    mask = Image.new('L', (width, height), 0)
+    draw = ImageDraw.Draw(mask)
+
+    # Fill each polygon with white (opaque)
+    for coords in polygons:
+        if len(coords) >= 3:
+            draw.polygon(coords, fill=255)
+
+    return mask
+
+
+def generate_thumbnail(plate_svg_path: Path, cache_path: Path) -> bool:
+    """Generate a thumbnail with polygon alpha mask and save to cache."""
+    # Get JP2 path from SVG
+    jp2_path = get_jp2_path_from_svg(plate_svg_path)
+    if jp2_path is None or not jp2_path.exists():
+        print(f"JP2 file not found: {jp2_path}")
+        return False
+
+    try:
+        # Load the JP2 image
+        img = Image.open(jp2_path)
+        width, height = img.size
+
+        # Convert to RGBA if needed
+        if img.mode != 'RGBA':
+            img = img.convert('RGBA')
+
+        # Extract polygons from SVG
+        polygons = extract_polygons_from_svg(plate_svg_path)
+
+        if polygons:
+            # Create alpha mask
+            mask = create_alpha_mask(polygons, width, height)
+
+            # Apply the mask as alpha channel
+            img.putalpha(mask)
+
+        # Scale down to 10%
+        new_width = int(width * 0.1)
+        new_height = int(height * 0.1)
+        img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+        # Ensure cache directory exists
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Save as PNG with transparency
+        img.save(cache_path, 'PNG')
+        print(f"Generated thumbnail: {cache_path}")
+        return True
+
+    except Exception as e:
+        print(f"Error generating thumbnail: {e}")
+        return False
+
+
 # Flask routes
 
 @app.route('/')
@@ -238,6 +367,43 @@ def api_save_plate(volume, plate_id):
         return jsonify({"success": True, **results})
     else:
         return jsonify({"error": "Failed to save", **results}), 500
+
+
+@app.route('/api/plate/<volume>/<plate_id>/thumb')
+def api_plate_thumbnail(volume, plate_id):
+    """Generate and serve a plate thumbnail with polygon alpha mask."""
+    # Construct paths
+    plate_svg_path = OUTPUT_DIR / volume / plate_id / "plate.svg"
+
+    if not plate_svg_path.exists():
+        return jsonify({"error": "plate.svg not found"}), 404
+
+    # Get JP2 path from SVG metadata
+    jp2_path = get_jp2_path_from_svg(plate_svg_path)
+    if jp2_path is None:
+        return jsonify({"error": "JP2 path not found in SVG metadata"}), 404
+
+    if not jp2_path.exists():
+        return jsonify({"error": f"JP2 file not found: {jp2_path}"}), 404
+
+    # Cache path is alongside the JP2 file
+    cache_path = jp2_path.parent / f"{plate_id}.thumb.png"
+
+    # Check if cache is valid (exists and newer than SVG)
+    regenerate = True
+    if cache_path.exists():
+        cache_mtime = cache_path.stat().st_mtime
+        svg_mtime = plate_svg_path.stat().st_mtime
+        if cache_mtime > svg_mtime:
+            regenerate = False
+
+    # Generate if needed
+    if regenerate:
+        if not generate_thumbnail(plate_svg_path, cache_path):
+            return jsonify({"error": "Failed to generate thumbnail"}), 500
+
+    # Serve the cached file
+    return send_file(cache_path, mimetype='image/png')
 
 
 @app.route('/media/<path:filename>')
@@ -1146,7 +1312,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 img.classList.add('locked');
             }
             img.id = `thumb-${plate.plate_id}`;
-            img.src = `/media/${plate.plate_id}.thumb.png`;
+            img.src = `/api/plate/${volumeName}/${plate.plate_id}/thumb`;
             img.dataset.volume = volumeName;
             img.dataset.plateId = plate.plate_id;
 
@@ -1421,7 +1587,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 thumb = document.createElement('img');
                 thumb.className = 'plate-thumbnail';
                 thumb.id = `thumb-${currentPlate.plate_id}`;
-                thumb.src = `/media/${currentPlate.plate_id}.thumb.png`;
+                thumb.src = `/api/plate/${currentPlate.volume}/${currentPlate.plate_id}/thumb`;
                 thumb.dataset.volume = currentPlate.volume;
                 thumb.dataset.plateId = currentPlate.plate_id;
                 thumbnailsLayer.appendChild(thumb);
