@@ -6,6 +6,7 @@ Supports recursive segmentation for atlas plates. Steps:
 """
 
 import argparse
+import gc
 import json
 import re
 import urllib.request
@@ -524,6 +525,14 @@ def detect_text_regions(
     print(f"  Detected {pixel_count:,} text pixels ({pixel_count / (width * height) * 100:.2f}%)")
     print(f"  Found {len(text_regions)} text regions")
 
+    # Free GPU memory
+    del model, predictor, img_tensor
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+
     return mask, text_regions
 
 
@@ -598,6 +607,15 @@ def inpaint_with_lama(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
 
     # Convert RGB back to BGR
     result_bgr = cv2.cvtColor(cur_res, cv2.COLOR_RGB2BGR)
+
+    # Free GPU memory
+    del model, img_tensor, mask_tensor, inpainted
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+
     return result_bgr
 
 
