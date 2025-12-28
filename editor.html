@@ -2162,24 +2162,27 @@
 
             const selectedIndices = Array.from(selectedIds).sort((a, b) => a - b);
 
-            // Check if all selected polygons belong to the same block
-            const blockIds = new Set();
-            selectedIndices.forEach(idx => {
-                const poly = polygons[idx];
-                if (poly.block_id) {
-                    blockIds.add(poly.block_id);
-                } else {
-                    blockIds.add(null);  // No block_id (plate mode or standalone)
+            // For segmentation mode, check if all selected polygons belong to the same block
+            let commonBlockId = null;
+            if (currentSvgType === 'segmentation') {
+                const blockIds = new Set();
+                selectedIndices.forEach(idx => {
+                    const poly = polygons[idx];
+                    if (poly.block_id) {
+                        blockIds.add(poly.block_id);
+                    } else {
+                        blockIds.add(null);  // No block_id (standalone)
+                    }
+                });
+
+                // If polygons span multiple blocks (or no blocks), don't allow merge
+                if (blockIds.size > 1 || blockIds.has(null)) {
+                    showToast('Cannot merge: selected items must belong to the same block', 'warning');
+                    return;
                 }
-            });
 
-            // If polygons span multiple blocks (or no blocks), don't allow merge
-            if (blockIds.size > 1 || blockIds.has(null)) {
-                showToast('Cannot merge: selected items must belong to the same block', 'warning');
-                return;
+                commonBlockId = Array.from(blockIds)[0];
             }
-
-            const commonBlockId = Array.from(blockIds)[0];
 
             // Get selected polygon points
             const selectedPolygons = [];
