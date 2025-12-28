@@ -93,10 +93,10 @@ def get_volumes() -> list[dict]:
 
 
 def load_plate_alignment(plate_svg_path: Path, plate_id: str) -> dict:
-    """Load alignment metadata from plate.svg or fallback JSON."""
+    """Load alignment metadata from plate.svg only (no cross-volume JSON fallback)."""
     result = {"has_alignment": False}
 
-    # Try plate.svg first
+    # Only read from plate.svg to avoid cross-volume contamination
     if plate_svg_path.exists():
         try:
             tree = ET.parse(plate_svg_path)
@@ -128,27 +128,11 @@ def load_plate_alignment(plate_svg_path: Path, plate_id: str) -> dict:
         except Exception as e:
             print(f"Error reading plate.svg: {e}")
 
-    # Try fallback JSON
-    json_path = MEDIA_DIR / f"{plate_id}.metadata.json"
-    if json_path.exists():
-        try:
-            with open(json_path) as f:
-                data = json.load(f)
-                if "angle" in data and "scale" in data and "pos" in data:
-                    return {
-                        "angle": data["angle"],
-                        "scale": data["scale"],
-                        "pos": data["pos"],
-                        "has_alignment": True
-                    }
-        except Exception as e:
-            print(f"Error reading metadata.json: {e}")
-
     return result
 
 
 def save_plate_alignment(volume: str, plate_id: str, alignment: dict) -> dict:
-    """Save alignment metadata to plate.svg and fallback JSON."""
+    """Save alignment metadata to plate.svg and volume-specific JSON backup."""
     results = {"svg_saved": False, "json_saved": False}
 
     plate_svg_path = OUTPUT_DIR / volume / plate_id / "plate.svg"
@@ -189,23 +173,26 @@ def save_plate_alignment(volume: str, plate_id: str, alignment: dict) -> dict:
             print(f"Error saving to plate.svg: {e}")
             results["svg_error"] = str(e)
 
-    # Also save fallback JSON
-    json_path = MEDIA_DIR / f"{plate_id}.metadata.json"
-    try:
-        json_data = {
-            "angle": alignment['angle'],
-            "scale": alignment['scale'],
-            "pos": alignment['pos']
-        }
-        if 'calibration' in alignment:
-            json_data['calibration'] = alignment['calibration']
+    # Also save fallback JSON to volume-specific location
+    # Get JP2 path from SVG to determine correct media directory
+    jp2_path = get_jp2_path_from_svg(plate_svg_path)
+    if jp2_path is not None:
+        json_path = jp2_path.parent / f"{plate_id}.metadata.json"
+        try:
+            json_data = {
+                "angle": alignment['angle'],
+                "scale": alignment['scale'],
+                "pos": alignment['pos']
+            }
+            if 'calibration' in alignment:
+                json_data['calibration'] = alignment['calibration']
 
-        with open(json_path, 'w') as f:
-            json.dump(json_data, f, indent=2)
-        results["json_saved"] = True
-    except Exception as e:
-        print(f"Error saving metadata.json: {e}")
-        results["json_error"] = str(e)
+            with open(json_path, 'w') as f:
+                json.dump(json_data, f, indent=2)
+            results["json_saved"] = True
+        except Exception as e:
+            print(f"Error saving metadata.json: {e}")
+            results["json_error"] = str(e)
 
     return results
 
@@ -429,8 +416,29 @@ def api_plate_thumbnail(volume, plate_id):
 
 @app.route('/media/<path:filename>')
 def serve_media(filename):
-    """Serve media files (JPEG images, thumbnails)."""
+    """Serve media files (JPEG images, thumbnails) - legacy, uses MEDIA_DIR."""
     return send_from_directory(MEDIA_DIR, filename)
+
+
+@app.route('/api/plate/<volume>/<plate_id>/image')
+def api_plate_image(volume, plate_id):
+    """Serve the plate JPEG image from the correct volume directory."""
+    plate_svg_path = OUTPUT_DIR / volume / plate_id / "plate.svg"
+
+    if not plate_svg_path.exists():
+        return jsonify({"error": "plate.svg not found"}), 404
+
+    # Get JP2 path from SVG metadata to find the correct media directory
+    jp2_path = get_jp2_path_from_svg(plate_svg_path)
+    if jp2_path is None:
+        return jsonify({"error": "JP2 path not found in SVG metadata"}), 404
+
+    # JPEG is in the same directory as JP2
+    jpeg_path = jp2_path.parent / f"{plate_id}.jpeg"
+    if not jpeg_path.exists():
+        return jsonify({"error": f"JPEG file not found: {jpeg_path}"}), 404
+
+    return send_file(jpeg_path, mimetype='image/jpeg')
 
 
 @app.route('/media/overview/<path:filename>')
@@ -730,6 +738,16 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 
         .plate-item .status-icon.pending {
             background: #d4a017;
+        }
+
+        .plate-item .status-icon.overview {
+            background: #4a8aca;
+        }
+
+        .plate-item.overview-item {
+            border-bottom: 1px solid #0f3460;
+            margin-bottom: 4px;
+            font-style: italic;
         }
 
         .plate-item .plate-name {
@@ -1401,6 +1419,17 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 const plateList = document.createElement('div');
                 plateList.className = 'plate-list';
 
+                // Add Overview item at the top
+                const overviewItem = document.createElement('div');
+                overviewItem.className = 'plate-item overview-item';
+                overviewItem.dataset.volume = volume.name;
+                overviewItem.innerHTML = `
+                    <div class="status-icon overview"></div>
+                    <span class="plate-name">Overview</span>
+                `;
+                overviewItem.addEventListener('click', () => selectOverview(volume.name));
+                plateList.appendChild(overviewItem);
+
                 volume.plates.forEach(plate => {
                     const item = document.createElement('div');
                     item.className = 'plate-item';
@@ -1473,6 +1502,33 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             img.style.transform = `translate(-50%, -50%) rotate(${angle}deg) scale(${scale})`;
         }
 
+        async function selectOverview(volumeName) {
+            // Switch to volume's reference map without starting plate alignment
+            if (volumeName !== currentVolume) {
+                await switchReferenceMap(volumeName);
+            } else {
+                // Just reload thumbnails for this volume
+                renderAlignedThumbnails();
+            }
+
+            // Deselect any active plate
+            document.querySelectorAll('.plate-item.active').forEach(el => el.classList.remove('active'));
+
+            // Select the overview item
+            const overviewItem = document.querySelector(`.overview-item[data-volume="${volumeName}"]`);
+            if (overviewItem) overviewItem.classList.add('active');
+
+            // Clear current plate state
+            currentPlate = null;
+            workflowStep = 0;
+            btnSave.disabled = true;
+            calibrationPanel.style.display = 'none';
+
+            // Update status
+            statusEl.textContent = `Viewing ${volumeName} overview`;
+            updateHelpText(`Viewing ${volumeName} reference map. Click "Align ${volumeName}" to adjust map orientation, or select a plate to align.`);
+        }
+
         async function selectPlate(volumeName, plate) {
             // Switch reference map if volume changed
             if (volumeName !== currentVolume) {
@@ -1525,9 +1581,9 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             // Clear any existing markers
             clearMarkers();
 
-            // Show modal with plate image
+            // Show modal with plate image (volume-aware path)
             modalTitle.textContent = `Align ${plate.plate_id}`;
-            modalImage.src = `/media/${plate.plate_id}.jpeg`;
+            modalImage.src = `/api/plate/${volumeName}/${plate.plate_id}/image`;
             modal.classList.add('active');
 
             updateModalStep();
