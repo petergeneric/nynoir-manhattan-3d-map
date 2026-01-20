@@ -2,9 +2,6 @@
 
 This collection of scripts is what I am using to process early 1900s Manhattan survey imagery into 3D models in an attempt to create a moderately realistic base layer showing Manhattan in the 1920s
 
-This project was inspired by [New York Noir](https://www.nynoir.org), set in the same time period (and for which I have built an interactive map tool)
-
-
 
 ## Source Data
 
